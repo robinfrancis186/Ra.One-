@@ -30,7 +30,7 @@ const body = html
   .slice(html.indexOf('<body>') + 6, html.indexOf('<script src='))
   .trim();
 
-const TITLE = 'RA.ONE — Lucifer Protocol';
+const TITLE = 'Ra.One: Lucifer Protocol';
 const DESC = 'An unofficial arcade fan tribute to Ra.One (2011): three levels, ' +
              'one H.A.R.T., one bullet, ten copies and a single shadow.';
 
