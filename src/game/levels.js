@@ -70,6 +70,7 @@
     put(g, 97, 12, 'd');
 
     row(g, 103, 108, 15, '=');
+    put(g, 105, 14, 'd');
     box(g, 110, FLOOR - 4, 113, FLOOR - 1, '#');
     row(g, 116, 121, 12, '=');
     put(g, 119, 11, 'h');
@@ -105,6 +106,8 @@
       boss: 'ra1',
       bossX: 144, arenaX: 129,
       hartMax: 100,
+      stalkers: [[30, 12, 0.50], [76, 11, 0.44], [124, 12, 0.56]],
+      incursions: [58, 108],
       story: 'l1'
     };
   }
@@ -173,6 +176,8 @@
       autoScroll: 1.15,
       timer: 100,
       hartMax: 130,
+      stalkers: [[42, 11, 0.48], [98, 10, 0.42], [152, 11, 0.52]],
+      incursions: [64, 128],
       story: 'l2'
     };
   }

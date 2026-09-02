@@ -10,36 +10,44 @@
   var C = global.RA.core, Gfx = C.Gfx, PAL = C.PAL, T = C.TILE;
   var Audio = global.RA.Audio, ent = global.RA.ent;
 
-  function drawRa(x, y, o) {
+  /* Ra.One is drawn from the same baked rig as everything else, at a
+     larger scale, with his own black-and-seam palette and a cape. He
+     should read as bigger than you before you have read anything else. */
+  var RA_SCALE = 1.3;
+
+  function bossPose(b) {
+    if (b.aiming) return ['aim', 0];
+    if (b.act === 'charge' || b.act === 'rush') return ['run', Math.floor(b.anim)];
+    if (b.act) return ['cast', b.actT > 0.2 ? 0 : 1];
+    if (b.hurtT > 0.06) return ['hurt', 0];
+    if (!b.onGround) return [b.vy < 0 ? 'jump' : 'fall', 0];
+    if (Math.abs(b.vx) > 0.5) return ['run', Math.floor(b.anim)];
+    return ['idle', Math.floor(b.anim * 0.35)];
+  }
+
+  function drawRa(cxp, feetY, o) {
     o = o || {};
-    var w = o.w || 22, h = o.h || 40;
-    // the dark he carries with him
-    if (o.aura !== false) {
-      Gfx.glow(x + w / 2, y + h * 0.45, w * 1.5, '#000000', 0.55 * (o.alpha === undefined ? 1 : o.alpha));
-      Gfx.glow(x + w / 2, y + h * 0.35, w * 1.1, o.eye || PAL.raRed, 0.14 * (o.alpha === undefined ? 1 : o.alpha));
-    }
-    // cape / silhouette
-    if (o.alpha !== undefined) Gfx.ctx.globalAlpha = o.alpha;
-    Gfx.rect(x + 1, y + 8, w - 2, h - 14, o.dark || PAL.ra);
-    if (o.alpha !== undefined) Gfx.ctx.globalAlpha = 1;
-    ent.figure(x, y, {
-      w: w, h: h, face: o.face || 1, phase: o.phase || 0, state: o.state || 'idle',
-      suit: o.hurt ? PAL.white : (o.suit || PAL.ra),
-      trim: o.trim || PAL.raSeam,
-      glow: o.glow || PAL.raRed, eye: o.eye || PAL.raRed,
-      faceless: o.faceless !== false, core: !!o.core, coreLevel: o.coreLevel || 1,
-      alpha: o.alpha
-    });
-    // the seams that make him read as "rendered, not born"
+    var sheet = o.sheet || ent.sheets().raone;
+    var sc = o.scale || RA_SCALE;
     var a = (o.alpha === undefined ? 1 : o.alpha);
-    // rim light down both flanks, so a black figure still has edges
-    Gfx.rectA(x + 2, y + h * 0.22, 1, h * 0.52, o.trim || PAL.raSeam, 0.45 * a);
-    Gfx.rectA(x + w - 3, y + h * 0.22, 1, h * 0.52, o.trim || PAL.raSeam, 0.45 * a);
-    // the scan band where a face would be
-    Gfx.rectA(x + w * 0.28, y + h * 0.10, w * 0.44, 2, o.eye || PAL.raRed, 0.85 * a);
-    Gfx.rectA(x + 3, y + 12, w - 6, 1, o.trim || PAL.raSeam, 0.8 * a);
-    Gfx.rectA(x + 3, y + 18, w - 6, 1, o.trim || PAL.raSeam, 0.5 * a);
-    if (o.eyeGlow !== false) Gfx.glow(x + w / 2, y + 4, 9, o.eye || PAL.raRed, 0.4 * a);
+    var top = feetY - 34 * sc;
+
+    // the dark he carries with him
+    Gfx.glow(cxp, feetY - 20 * sc, 34 * sc, '#000000', 0.5 * a);
+
+    if (o.trail) {
+      for (var k = 1; k <= 3; k++) {
+        global.RA.spr.draw(sheet, o.anim, o.frame, cxp - (o.face || 1) * k * 7, feetY,
+          o.face || 1, { alpha: 0.13 * (4 - k) * a, scale: sc });
+      }
+    }
+    global.RA.spr.draw(sheet, o.anim || 'idle', o.frame || 0, cxp, feetY, o.face || 1,
+      { alpha: o.alpha, scale: sc, flash: o.hurt ? '#ffffff' : null });
+
+    if (o.dim !== true) {
+      Gfx.glow(cxp, top + 6 * sc, 10, o.eye || PAL.raRed, 0.55 * a);   // the scan band
+      Gfx.glow(cxp, top + 16 * sc, 13, o.eye || PAL.raRed, 0.35 * a);  // the core
+    }
   }
 
   /* ================= BASE ================= */
@@ -163,11 +171,13 @@
         w: 8, h: 5, dmg: 10, owner: 'enemy', color: PAL.raRed, life: 2.0 });
     }
   };
-  RaOne1.prototype.draw = function (cam) {
-    var x = Math.round(this.x - cam.x), y = Math.round(this.y - cam.y);
-    Gfx.rectA(x + 2, y + this.h - 1, this.w - 4, 3, '#000', 0.5);
-    if (this.act === 'charge') Gfx.glow(x + 11, y + 20, 26, PAL.raRed, 0.35);
-    drawRa(x, y, { face: this.face, phase: this.anim, state: this.state, hurt: this.hurtT > 0 });
+  RaOne1.prototype.draw = function (cam, player, world) {
+    var fx = Math.round(this.cx() - cam.x), fy = Math.round(this.y + this.h - cam.y);
+    if (world) ent.contactShadow(this, world, cam);
+    var pose = bossPose(this);
+    if (this.act === 'charge') Gfx.glow(fx, fy - 24, 30, PAL.raRed, 0.4);
+    drawRa(fx, fy, { face: this.face, anim: pose[0], frame: pose[1],
+                     hurt: this.hurtT > 0, trail: this.act === 'charge' });
   };
 
   /* ================= RA.ONE v2.0 — THE SHAPESHIFTER ================= */
@@ -271,22 +281,28 @@
         w: 8, h: 5, dmg: 12, owner: 'enemy', color: PAL.hart, life: 2.2 });
     }
   };
-  RaOne2.prototype.draw = function (cam) {
-    var x = Math.round(this.x - cam.x), y = Math.round(this.y - cam.y);
-    Gfx.rectA(x + 2, y + this.h - 1, this.w - 4, 2, '#000', 0.4);
+  RaOne2.prototype.draw = function (cam, player, world) {
+    var fx = Math.round(this.cx() - cam.x), fy = Math.round(this.y + this.h - cam.y);
+    if (world) ent.contactShadow(this, world, cam);
+    var pose = bossPose(this);
+
     if (this.morphT > 0) {
-      for (var i = 0; i < 7; i++) {
-        Gfx.rectA(x - 4 + Math.random() * 30, y + Math.random() * this.h, 14, 2, PAL.raSeam, 0.5);
+      // mid-shift: the silhouette tears into scanlines
+      for (var i = 0; i < 8; i++) {
+        Gfx.rectA(fx - 18 + Math.random() * 36, fy - 4 - Math.random() * 40,
+                  16, 2, PAL.raSeam, 0.45);
       }
     }
     if (this.mimic) {
-      // wearing G.One's colours — same silhouette, wrong light
-      drawRa(x, y, { face: this.face, phase: this.anim, state: this.state, hurt: this.hurtT > 0,
-        suit: PAL.bone, trim: PAL.magenta, dark: '#2a2036', eye: PAL.magenta, glow: PAL.magenta,
-        faceless: false, core: true, coreLevel: 0.9 });
-      Gfx.glow(x + 11, y + 20, 24, PAL.magenta, 0.3);
+      // he is wearing your face. Same rig, your colours, wrong light.
+      drawRa(fx, fy, { face: this.face, anim: pose[0], frame: pose[1],
+                       hurt: this.hurtT > 0, sheet: ent.sheets().gone,
+                       scale: 1.15, eye: PAL.magenta, trail: this.act === 'rush' });
+      Gfx.glow(fx, fy - 22, 26, PAL.magenta, 0.35);
+      Gfx.ring(fx, fy - 20, 20 + Math.sin(this.t * 5) * 3, PAL.magenta, 1, 0.4);
     } else {
-      drawRa(x, y, { face: this.face, phase: this.anim, state: this.state, hurt: this.hurtT > 0 });
+      drawRa(fx, fy, { face: this.face, anim: pose[0], frame: pose[1],
+                       hurt: this.hurtT > 0, trail: this.act === 'rush' });
     }
   };
 
@@ -519,55 +535,78 @@
     return out;
   };
 
-  RaOne3.prototype.draw = function (cam, player) {
-    var x, y, i;
+  RaOne3.prototype.draw = function (cam, player, world) {
+    var i, fx, fy;
     if (this.phase === 3) {
       for (i = 0; i < this.clones.length; i++) {
         var c = this.clones[i];
         if (!c.alive) continue;
-        x = Math.round(c.x - cam.x); y = Math.round(c.y - cam.y);
+        fx = Math.round(c.x + this.w / 2 - cam.x);
+        fy = Math.round(c.y + this.h - cam.y);
         var isReal = (i === this.realIdx);
+
         // THE TELL: every copy stands in the same pool of light.
-        // Only the original puts anything in the way of it.
-        Gfx.glow(x + this.w / 2, y + this.h + 2, 22, PAL.hart, 0.20);
+        // Exactly one of them puts something in the way of it.
+        Gfx.glow(fx, fy + 2, 26, PAL.hart, 0.22);
         if (isReal) {
-          Gfx.rectA(x - 1, y + this.h - 1, this.w + 2, 4, '#000', 0.85);
-          Gfx.rectA(x - 4, y + this.h + 3, this.w + 8, 3, '#000', 0.55);
-          Gfx.rectA(x - 7, y + this.h + 6, this.w + 14, 2, '#000', 0.3);
+          Gfx.ctx.globalAlpha = 0.85;
+          Gfx.ctx.fillStyle = '#000';
+          Gfx.ctx.beginPath();
+          Gfx.ctx.ellipse(fx, fy + 1, 15, 4, 0, 0, Math.PI * 2);
+          Gfx.ctx.fill();
+          Gfx.ctx.globalAlpha = 0.4;
+          Gfx.ctx.beginPath();
+          Gfx.ctx.ellipse(fx + 3, fy + 5, 22, 3, 0, 0, Math.PI * 2);
+          Gfx.ctx.fill();
+          Gfx.ctx.globalAlpha = 1;
         }
-        var fl = c.fade > 0 ? 0.4 : 1;
-        drawRa(x, y, {
-          face: c.face, phase: this.anim + i, state: 'idle',
-          hurt: isReal && this.hurtT > 0, alpha: fl,
-          eyeGlow: true
+        drawRa(fx, fy, {
+          face: c.face, anim: 'idle', frame: Math.floor(this.anim * 0.35) + i,
+          hurt: isReal && this.hurtT > 0,
+          alpha: c.fade > 0 ? 0.45 : 1
         });
       }
       return;
     }
-    x = Math.round(this.x - cam.x); y = Math.round(this.y - cam.y);
-    Gfx.rectA(x + 2, y + this.h - 1, this.w - 4, 2, '#000', 0.4);
-    if (this.phase === 1) Gfx.ring(x + 11, y + 20, 26 + Math.sin(this.t * 4) * 3, PAL.steelLite, 1, 0.35);
-    drawRa(x, y, { face: this.face, phase: this.anim, state: this.state, hurt: this.hurtT > 0 });
 
-    // the laser sight of a gun that only needs to work once
+    fx = Math.round(this.cx() - cam.x);
+    fy = Math.round(this.y + this.h - cam.y);
+    if (world) ent.contactShadow(this, world, cam);
+    var pose = bossPose(this);
+
+    if (this.phase === 1) {
+      // the guard he has not lowered yet
+      var r = 30 + Math.sin(this.t * 4) * 3;
+      Gfx.ring(fx, fy - 22, r, PAL.steelLite, 1, 0.35);
+      Gfx.ring(fx, fy - 22, r - 5, PAL.steelLite, 1, 0.15);
+    }
+    drawRa(fx, fy, { face: this.face, anim: pose[0], frame: pose[1],
+                     hurt: this.hurtT > 0, trail: this.act === 'rush' });
+
+    // the laser sight of a gun that only has to work once
     if (this.phase === 2 && this.aiming && player && !player.dead) {
       var px = player.cx() - cam.x, py = player.cy() - cam.y;
       var t = 1 - C.clamp(this.aimT / 2.6, 0, 1);
-      Gfx.ctx.globalAlpha = 0.35 + t * 0.5;
-      Gfx.line(x + 11, y + 16, px, py, PAL.raRed, 1);
+      var gx = fx + this.face * 14, gy = fy - 26;
+      Gfx.ctx.globalAlpha = 0.3 + t * 0.55;
+      Gfx.line(gx, gy, px, py, PAL.raRed, 1);
       Gfx.ctx.globalAlpha = 1;
-      Gfx.ring(px, py, 12 - t * 8, PAL.raRed, 1, 0.9);
+      Gfx.ring(px, py, 14 - t * 9, PAL.raRed, 1, 0.9);
       Gfx.ring(px, py, 3, PAL.raRed, 1, 0.9);
-      Gfx.glow(x + 11, y + 16, 10 + t * 10, PAL.raRed, 0.4 + t * 0.4);
+      Gfx.line(px - 8, py, px - 3, py, PAL.raRed, 1);
+      Gfx.line(px + 3, py, px + 8, py, PAL.raRed, 1);
+      Gfx.line(px, py - 8, px, py - 3, PAL.raRed, 1);
+      Gfx.line(px, py + 3, px, py + 8, PAL.raRed, 1);
+      Gfx.glow(gx, gy, 10 + t * 12, PAL.raRed, 0.4 + t * 0.5);
     }
   };
 
   global.RA.bosses = {
+    drawRa: drawRa, bossPose: bossPose, RA_SCALE: RA_SCALE,
     make: function (kind, x, y, level, game) {
       if (kind === 'ra1') return new RaOne1(x, y, level, game);
       if (kind === 'ra2') return new RaOne2(x, y, level, game);
       return new RaOne3(x, y, level, game);
-    },
-    drawRa: drawRa
+    }
   };
 })(window);

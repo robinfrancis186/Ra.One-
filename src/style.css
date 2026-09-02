@@ -61,10 +61,14 @@ html, body {
     rgba(255,255,255,0.05) 0%, rgba(255,255,255,0) 32%);
 }
 #hint {
-  position: fixed; left: 0; right: 0; bottom: 6px;
-  text-align: center; font-size: 11px; letter-spacing: 1px;
-  color: #2b3a52;
+  position: fixed; left: 0; right: 0; bottom: 4px;
+  margin: 0; text-align: center;
+  font-size: 10px; letter-spacing: 1px;
+  color: #46617f; text-shadow: 0 1px 3px #000;
+  transition: opacity 700ms ease;
+  pointer-events: none;
 }
+#hint.gone { opacity: 0; }
 /* touch controls — only shown on touch devices */
 #touchpad {
   position: fixed; inset: auto 0 0 0; height: 40vh;

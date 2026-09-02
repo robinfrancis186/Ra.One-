@@ -85,14 +85,67 @@ survive, then *rearm* to win.
 - Input is **latched**: a press is queued on keydown and consumed once, so a 1ms tap can never
   fall between two frames.
 
+## Answering the audience, not just the film
+
+The most consistent complaint in eleven years of reviews is not the script — it is that
+**Ra.One is barely in the film he is named after.** The design responds to that directly:
+
+- He **watches from the backdrop** of levels 1 and 2, standing on a rooftop or a coach end in a
+  darker palette of his own sprite sheet, turning to face you as you pass, two red pinpricks
+  finding you across the middle distance.
+- He **interrupts twice a level.** An incursion phases him in beside you, he asks his one
+  question — WHERE IS LUCIFER? — takes a rush or a bolt fan, and phases out. You cannot kill him
+  there, and the game says so: *a player can only be killed in the third level*. That was already
+  the film's rule; here it also fixes the pacing.
+- He is **the entire third act**, in three phases, instead of a boss bar at the end of a corridor.
+
+The other thing audiences agree on is that the film looks better than it has any right to. So the
+art got the same treatment as the rules.
+
+## The art pipeline
+
+There are no image files, and there cannot be — the game ships as a single HTML file. So the art
+is **authored as pixel maps and baked at boot**:
+
+1. **Parts.** Head, torso, pelvis, upper arm, forearm, thigh, shin and cape are authored as rows
+   of characters, one character per pixel, against a palette of seven keys.
+2. **Palettes.** The same limb art paints G.One, a Random Access sentry, an Akashi Mask and a
+   background ghost, which is thematically honest: in the fiction they *are* avatars off one
+   motion-capture rig.
+3. **A 2D skeleton.** Nine animations — idle, run (6 frames), jump, fall, punch, dash, hurt, aim,
+   cast — are defined as joint angles, then composited through nested canvas transforms with
+   smoothing off, so rotated pixels stay chunky rather than blurring.
+4. **Two post passes per frame.** An auto-outline walks the baked frame and darkens every
+   transparent pixel touching the silhouette; a rim-light pass mixes 45% of a light colour into
+   every pixel whose neighbour above is empty. Those two passes are most of the difference
+   between "assembled parts" and "a drawn character".
+5. **Bake once, blit forever.** Every frame of every character is an offscreen canvas by the time
+   the title screen appears. At runtime a character is a single `drawImage`.
+
+Tiles are baked the same way — panel faces, seams, rivets, deterministic grime, a lit top lip and
+the dark band beneath it that sells the thickness.
+
+**Bloom** runs over the whole frame: a bright-pass (`brightness(1.05) contrast(3.4) blur(2px)`)
+into a third-resolution buffer, composited back with `lighter` at 45%. Every glow, muzzle flash
+and neon edge gets real light out of it. It is applied to the world and *then* the HUD is drawn
+on top, so the interface stays crisp while the world glows. A drifting grain tile finishes it.
+Measured at a steady 59fps in headless Chromium.
+
 ## Presentation
 
-Everything is procedural. `figure()` draws a humanoid from rectangles with a run cycle, an
-attack extension and a glowing core; Ra.One is the same routine with a faceless head, a red scan
-band and rim lighting so a near-black silhouette still reads against a dark floor. Backdrops are
-three parallax scenes — a rainy London skyline, a Mumbai night whipping past catenary poles, and
-a wireframe grid horizon — with a scrim drawn between backdrop and playfield so the city is never
-mistaken for something you can stand on.
+Backdrops are five parallax layers each, drawn from deterministic noise so nothing crawls between
+frames, with a scrim between backdrop and playfield so the city is never mistaken for something
+you can stand on.
+
+- **London**: two skyline bands with lit windows and blinking aircraft warning lights, the Barron
+  Industries slab with its spine of light and its sign, interior mullions sliding past in the near
+  ground, rain at two speeds, and floor fog.
+- **Mumbai**: a warm violet night, catenary poles whipping past, sparks off the rails — and
+  **Chhatrapati Shivaji Terminus growing out of the haze as the clock runs down**, dome, turrets,
+  lit clock face and all. The film's second half is a countdown to that building, so the backdrop
+  counts down with it.
+- **The grid**: a wireframe horizon with a scan pulse running out to it, falling data columns, and
+  **the ten heads of Raavan** in the sky, blinking, above the fight where he becomes ten.
 
 Audio is a small WebAudio tracker: square/triangle/sawtooth voices, filtered-noise drums, and
 patterns written in a Phrygian-dominant (Bhairav-flavoured) scale — original music with a filmi

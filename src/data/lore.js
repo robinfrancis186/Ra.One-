@@ -62,17 +62,22 @@
     { cat: 'THE GAME', title: 'RULE 3 — ESCALATION',
       body: 'The power of the H.A.R.T. increases with every level. So does everything it is ' +
             'pointed at.' },
-    { cat: 'THE GAME', title: 'RULE 4 — THE ONE BULLET',
+    { cat: 'THE GAME', title: 'RULE 4 — THE ONE BULLET', boss: true,
       body: 'A player can be killed only in the third level, only by the anti-H.A.R.T. gun, and ' +
             'only while his H.A.R.T. is ATTACHED. The gun holds exactly one bullet. Fire it at a ' +
             'player whose H.A.R.T. is detached and it is spent forever.', shard: true },
-    { cat: 'THE GAME', title: 'THE TRICK',
+    { cat: 'THE GAME', title: 'THE TRICK', boss: true,
       body: 'G.One and Prateek let Ra.One take his shot — with the H.A.R.T. detached. The single ' +
             'round passes through a target it cannot kill. Ra.One, disarmed and enraged, splits ' +
             'into ten copies of himself.', shard: true },
-    { cat: 'THE GAME', title: 'THE SHADOW',
+    { cat: 'THE GAME', title: 'THE SHADOW', boss: true,
       body: 'Ten identical Ra.Ones, and no way to tell them apart — until they see it: only the ' +
             'original casts a shadow. The copies are light with nothing behind them.', shard: true },
+    { cat: 'THE GAME', title: 'RAVAN, TEN TIMES',
+      body: 'Shah Rukh Khan on the design: Ra.One is "the modern, new-age technology version ' +
+            'of our mythological Raavan, who was a mixture of ten different evil characters." ' +
+            'That is why the villain has no face, and it is why there are exactly ten of him at ' +
+            'the end. The ten heads are watching you in the third level.', shard: true },
     { cat: 'THE GAME', title: 'THE CROSSING',
       body: 'Ra.One is not hacked out or summoned. He uses the Barron transfer technology to walk ' +
             'out of the game over a wireless signal, into the real world, hunting a login name.' },
@@ -96,6 +101,12 @@
     { cat: 'THE FILM', title: 'BOX OFFICE',
       body: 'Over Rs 207 crore. Second highest-grossing Bollywood film of 2011 worldwide, third ' +
             'domestically, and the holder of several opening-weekend records.' },
+    { cat: 'THE FILM', title: 'WHAT PEOPLE SAID',
+      body: 'The reception was loudly split. Praised: the visual effects, the action, the music, ' +
+            'and the performances — plenty of viewers still call it the best-looking Indian ' +
+            'sci-fi of its moment. Criticised: the script, the plot holes, and a middle stretch ' +
+            'that sags. And one complaint comes up more than any other — that Arjun Rampal\'s ' +
+            'Ra.One, the best thing in the film, is barely in it.' },
     { cat: 'THE FILM', title: 'LOCATIONS',
       body: 'Principal photography began March 2010 across India and the United Kingdom. London ' +
             'for Barron Industries; Mumbai for the second half — including the runaway local and ' +
@@ -132,6 +143,18 @@
       body: 'LUCIFER PROTOCOL is an unofficial, non-commercial fan game. No footage, audio, art ' +
             'or code from the film or its tie-in game is used. Every sprite here is drawn with ' +
             'rectangles at runtime.' },
+    { cat: 'CABINET', title: 'THE COMPLAINT WE FIXED',
+      body: 'Since the thing audiences wanted more of was the villain, he is not saved for the ' +
+            'end here. He watches you from the rooftops and the coach ends across the whole ' +
+            'level. Twice a level he phases in beside you, asks where Lucifer is, takes a swing ' +
+            'and leaves — and you cannot kill him, because a player can only be killed in the ' +
+            'third level. That rule was already in the film. We just pointed it at the pacing.' },
+    { cat: 'CABINET', title: 'HOW THE ART IS MADE',
+      body: 'There are no image files. Characters are pixel maps assembled on a 2D skeleton and ' +
+            'baked into offscreen canvases at boot — pose the rig, composite the parts, run an ' +
+            'auto-outline and a rim-light pass, keep the frame. At runtime a character is one ' +
+            'drawImage. Tiles are baked the same way. The glow is a real bright-pass bloom over ' +
+            'the whole frame, which is why light behaves like light.' },
     { cat: 'CABINET', title: 'WHY IT LOOKS LIKE THIS',
       body: '640x360 internal resolution, integer-scaled, scanlines on top. Not because 2011 ' +
             'looked like this — because being eleven and standing in front of a cabinet did.' },

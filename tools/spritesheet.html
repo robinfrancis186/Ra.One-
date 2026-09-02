@@ -1,0 +1,45 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>Sprite contact sheet</title>
+<style>body{margin:0;background:#0b1018;color:#8fa;font:11px monospace}
+canvas{image-rendering:pixelated;display:block;margin:0 auto}</style></head>
+<body>
+<!-- Dev tool: open tools/spritesheet.html from a local server to see every
+     baked animation frame of every character at 3x. Not part of the game. -->
+<canvas id="screen" width="640" height="360" style="display:none"></canvas>
+<canvas id="sheet" width="1200" height="900"></canvas>
+<script src="../src/engine/core.js"></script>
+<script src="../src/engine/sprites.js"></script>
+<script>
+RA.core.Gfx.init(document.getElementById('screen'));
+var S = RA.spr.build();
+var out = document.getElementById('sheet'), o = out.getContext('2d');
+o.imageSmoothingEnabled = false;
+o.fillStyle = '#0b1018'; o.fillRect(0,0,out.width,out.height);
+var Z = 3, y = 16;
+var order = ['gone','raone','sentry','mask','ghost'];
+var anims = ['idle','run','jump','fall','punch','dash','hurt','aim','cast'];
+o.font = 'bold 12px monospace';
+order.forEach(function(name){
+  var sh = S[name];
+  o.fillStyle = '#7fd7ff'; o.fillText(name.toUpperCase(), 8, y);
+  var x = 90;
+  anims.forEach(function(an){
+    var frames = sh[an]; if(!frames) return;
+    o.fillStyle = '#556'; o.fillText(an, x, y - 4);
+    frames.forEach(function(cv){
+      o.drawImage(cv, 0,0,cv.width,cv.height, x, y, cv.width*Z, cv.height*Z);
+      x += cv.width*Z + 4;
+    });
+    x += 10;
+  });
+  y += sh.h*Z + 26;
+});
+o.fillStyle='#7fd7ff'; o.fillText('PROPS', 8, y);
+var px = 90;
+Object.keys(RA.spr.props).forEach(function(k){
+  var cv = RA.spr.props[k];
+  o.fillStyle='#556'; o.fillText(k, px, y-4);
+  o.drawImage(cv,0,0,cv.width,cv.height, px, y, cv.width*4, cv.height*4);
+  px += cv.width*4 + 24;
+});
+window.__done = true;
+</script></body></html>

@@ -6,8 +6,9 @@ The film is about a video game. So this is that video game — the one Shekhar S
 shipped, the one Prateek logged into as **LUCIFER**, the one Ra.One walked out of. Three levels,
 a H.A.R.T. in your chest, one bullet, ten copies and a single shadow.
 
-No engine, no build step, no dependencies, no asset files. Every sprite is drawn from rectangles
-at runtime and every note is synthesised live in the browser.
+No engine, no build step, no dependencies, no asset files. The characters are pixel art authored
+in code, posed on a 2D skeleton and baked into offscreen canvases at boot; the whole frame gets a
+real bright-pass bloom; and every note you hear is synthesised live in the browser.
 
 ```
 open index.html          # that's it
@@ -38,7 +39,9 @@ On a touch device an on-screen pad appears automatically.
 
 **LEVEL 1 — BARRON INDUSTRIES, LONDON.** The launch floor, the night the villain got out.
 Random Access sentries, RA-drones, Akashi Masks moving on the motion capture Akashi recorded.
-Boss: **Ra.One v1.0**, who is stronger than you, because the designer's son insisted.
+Ra.One watches from the rooftops and phases in twice to ask where Lucifer is — you cannot kill him
+there, and he knows it. Boss: **Ra.One v1.0**, who is stronger than you, because the designer's
+son insisted.
 
 **LEVEL 2 — MUMBAI LOCAL, INBOUND TO CST.** A runaway train with no brakes and a clock.
 Coach roofs, gaps between them, live gantries at exactly the height of a full jump. The train
@@ -76,6 +79,9 @@ src/style.css           the cabinet shell: bezel, scanlines, vignette
 src/engine/core.js      maths, palette, renderer, particles, camera
 src/engine/input.js     keyboard + touch, latched so no tap is dropped
 src/engine/audio.js     chiptune synth + SFX, all WebAudio, no files
+src/engine/sprites.js   the asset pipeline: pixel maps posed on a 2D rig and
+                        baked to offscreen canvases at boot, with auto-outline
+                        and rim-light passes
 src/data/lore.js        the Codex and the story cards
 src/game/levels.js      the three maps, stamped by a small DSL
 src/game/entities.js    tile collision, G.One, the enemies
@@ -83,6 +89,7 @@ src/game/bosses.js      Ra.One v1.0, v2.0, v3.0
 src/game/hud.js         parallax backdrops, tile painting, HUD
 src/game/main.js        state machine, rules glue, the loop
 tools/build.mjs         node tools/build.mjs -> dist/
+tools/spritesheet.html  dev tool: every baked animation frame, at 3x
 docs/                   film research + design notes
 ```
 

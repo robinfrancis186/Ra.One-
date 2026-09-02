@@ -54,10 +54,18 @@
       this.toast('CODEX UNLOCKED — ' + title, PAL.gold);
       return true;
     },
+    /* Data Shards hand out the pickup pool in order. Entries flagged
+       `boss` are earned by doing the thing, not by finding a shard, so
+       they are skipped here — otherwise the tail of the list would be
+       unreachable. */
     unlockNextShard: function () {
       for (var i = 0; i < RA.CODEX.length; i++) {
         var e = RA.CODEX[i];
-        if (e.shard && !this.unlocked[e.title]) return this.unlockShardByTitle(e.title);
+        if (e.shard && !e.boss && !this.unlocked[e.title]) return this.unlockShardByTitle(e.title);
+      }
+      for (i = 0; i < RA.CODEX.length; i++) {
+        var e2 = RA.CODEX[i];
+        if (e2.shard && !this.unlocked[e2.title]) return this.unlockShardByTitle(e2.title);
       }
       this.toast('ALL DATA SHARDS RECOVERED', PAL.gold);
       return false;
@@ -98,6 +106,7 @@
       this.canDetach = (lv.id === 3);
       this.timeLeft = lv.timer || 0;
       this.checkpoint = { x: this.world.spawnX, y: this.world.spawnY };
+      this.incursionsLeft = (lv.incursions || []).slice();
       this.world.cam.follow(this.player, true);
       this.arenaLeft = (lv.arenaX || 0) * T;
       this.respawnT = 0; this.clearT = 0; this.missTold = false;
@@ -310,6 +319,21 @@
         }
       }
 
+      /* --- he does not wait for the end of the level --- */
+      if (this.incursionsLeft && this.incursionsLeft.length && !this.bossActive) {
+        if (p.x > this.incursionsLeft[0] * T) {
+          this.incursionsLeft.shift();
+          var ix = p.cx() + (p.face > 0 ? 120 : -120);
+          ix = C.clamp(ix, 40, w.pxW - 60);
+          var iy = p.y - 16;
+          w.actors.push(new ent.Incursion(ix, iy, this));
+          Audio.sfx('bossroar');
+          Gfx.flash(PAL.raRed, 0.45, 0.35);
+          Gfx.shake(4, 0.4);
+          this.toast('RA.ONE: WHERE IS LUCIFER?', PAL.raRed);
+        }
+      }
+
       /* --- boss gate --- */
       if (!this.bossActive && p.x > w.bossGateX && lv.boss) {
         this.bossActive = true;
@@ -357,7 +381,7 @@
         a.update(dt, w, p);
         if (a.remove) { w.actors.splice(i, 1); this.bumpCombo(); continue; }
         if (C.aabb(a, p) && !p.dead) {
-          var dmg = (a.type === 'drone' && a.diveT > 0) ? 10 : 7;
+          var dmg = a.contact || ((a.type === 'drone' && a.diveT > 0) ? 10 : 7);
           p.hurt(dmg * (this.difficulty ? 1.4 : 1), w, a.cx() < p.cx() ? 1 : -1);
         }
       }
@@ -538,7 +562,8 @@
 
     drawPlay: function () {
       var w = this.world, p = this.player, cam = w.cam;
-      hud.Back[w.level.bg](cam, this.t);
+      hud.Back[w.level.bg](cam, this.t, this);
+      hud.drawStalkers(w, cam, this.t);
       hud.scrim(w.level.bg);
       hud.drawTiles(w, cam, this.t);
 
@@ -551,16 +576,21 @@
       }
       for (i = 0; i < w.actors.length; i++) {
         var a = w.actors[i];
-        if (Math.abs(a.cx() - cam.x - VW / 2) < VW) a.draw(cam);
+        if (Math.abs(a.cx() - cam.x - VW / 2) < VW) a.draw(cam, w);
       }
-      if (this.boss && !this.boss.dead) this.boss.draw(cam, p);
+      if (this.boss && !this.boss.dead) this.boss.draw(cam, p, w);
       p.drawHart(cam, w);
-      p.draw(cam);
+      p.draw(cam, w);
       for (i = 0; i < w.shots.length; i++) w.shots[i].draw(cam);
       w.parts.draw(cam);
 
       // level 3 arena veil
       if (w.level.bg === 'grid') Gfx.rectA(0, 0, VW, VH, '#0a1a2e', 0.10);
+
+      // bloom the world, then lay the HUD over it crisp
+      Gfx.ctx.setTransform(1, 0, 0, 1, 0, 0);
+      Gfx.post();
+      Gfx.ctx.translate(Math.round(Gfx.shakeX), Math.round(Gfx.shakeY));
 
       hud.drawHUD(this, w, p, this.boss);
 
@@ -609,8 +639,21 @@
     },
 
     drawTitle: function () {
-      hud.Back.grid({ x: this.t * 30, y: 0 }, this.t);
+      hud.Back.grid({ x: this.t * 30, y: 0 }, this.t, this);
       Gfx.rectA(0, 0, VW, VH, '#02030a', 0.45);
+
+      /* the two of them, waiting, on either side of the menu */
+      var fy = VH - 46;
+      Gfx.glow(96, fy, 34, PAL.hart, 0.18);
+      Gfx.rectA(60, fy, 72, 1, PAL.hart, 0.25);
+      RA.spr.draw(RA.spr.build().gone, 'idle', Math.floor(this.t * 1.6), 96, fy, 1, {});
+      Gfx.glow(96, fy - 20, 16, PAL.hart, 0.35);
+
+      Gfx.glow(542, fy, 40, PAL.raRed, 0.16);
+      Gfx.rectA(500, fy, 84, 1, PAL.raRed, 0.22);
+      RA.bosses.drawRa(542, fy, { face: -1, anim: 'idle',
+        frame: Math.floor(this.t * 1.4), scale: 1.35 });
+
       this.logo(VW / 2, 42, true);
 
       var items = [
@@ -660,7 +703,7 @@
 
     drawCodex: function () {
       Gfx.rect(0, 0, VW, VH, '#04060e');
-      hud.Back.grid({ x: this.t * 12, y: 0 }, this.t * 0.4);
+      hud.Back.grid({ x: this.t * 12, y: 0 }, this.t * 0.4, this);
       Gfx.rectA(0, 0, VW, VH, '#02030a', 0.72);
 
       var cats = this.codexCats(), list = this.codexList();
@@ -799,7 +842,7 @@
 
     drawCredits: function () {
       Gfx.rect(0, 0, VW, VH, '#03040a');
-      hud.Back.grid({ x: this.t * 20, y: 0 }, this.t * 0.5);
+      hud.Back.grid({ x: this.t * 20, y: 0 }, this.t * 0.5, this);
       Gfx.rectA(0, 0, VW, VH, '#02030a', 0.7);
       this.logo(VW / 2, 26, false);
       var rows = [

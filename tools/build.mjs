@@ -13,6 +13,7 @@ const SCRIPTS = [
   'src/engine/core.js',
   'src/engine/input.js',
   'src/engine/audio.js',
+  'src/engine/sprites.js',
   'src/data/lore.js',
   'src/game/levels.js',
   'src/game/entities.js',

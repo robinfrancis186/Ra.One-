@@ -41,9 +41,24 @@
     </div>
   </div>
 
+  <script>
+    // the hint is for the first ten seconds, not for the whole game
+    (function () {
+      function drop() {
+        var h = document.getElementById('hint');
+        if (h) h.classList.add('gone');
+        window.removeEventListener('keydown', drop);
+        window.removeEventListener('pointerdown', drop);
+      }
+      window.addEventListener('keydown', drop);
+      window.addEventListener('pointerdown', drop);
+      setTimeout(drop, 12000);
+    })();
+  </script>
   <script src="src/engine/core.js"></script>
   <script src="src/engine/input.js"></script>
   <script src="src/engine/audio.js"></script>
+  <script src="src/engine/sprites.js"></script>
   <script src="src/data/lore.js"></script>
   <script src="src/game/levels.js"></script>
   <script src="src/game/entities.js"></script>

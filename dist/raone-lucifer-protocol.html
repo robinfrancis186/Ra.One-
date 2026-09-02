@@ -69,10 +69,14 @@ html, body {
     rgba(255,255,255,0.05) 0%, rgba(255,255,255,0) 32%);
 }
 #hint {
-  position: fixed; left: 0; right: 0; bottom: 6px;
-  text-align: center; font-size: 11px; letter-spacing: 1px;
-  color: #2b3a52;
+  position: fixed; left: 0; right: 0; bottom: 4px;
+  margin: 0; text-align: center;
+  font-size: 10px; letter-spacing: 1px;
+  color: #46617f; text-shadow: 0 1px 3px #000;
+  transition: opacity 700ms ease;
+  pointer-events: none;
 }
+#hint.gone { opacity: 0; }
 /* touch controls — only shown on touch devices */
 #touchpad {
   position: fixed; inset: auto 0 0 0; height: 40vh;
@@ -125,6 +129,21 @@ html, body {
       </div>
     </div>
   </div>
+
+  <script>
+    // the hint is for the first ten seconds, not for the whole game
+    (function () {
+      function drop() {
+        var h = document.getElementById('hint');
+        if (h) h.classList.add('gone');
+        window.removeEventListener('keydown', drop);
+        window.removeEventListener('pointerdown', drop);
+      }
+      window.addEventListener('keydown', drop);
+      window.addEventListener('pointerdown', drop);
+      setTimeout(drop, 12000);
+    })();
+  </script>
 
 <script>
 /* ===== src/engine/core.js ===== */
@@ -189,9 +208,68 @@ html, body {
       canvas.width = VIEW_W; canvas.height = VIEW_H;
       this.ctx = canvas.getContext('2d');
       this.ctx.imageSmoothingEnabled = false;
+      this.initPost();
       this.resize();
       global.addEventListener('resize', this.resize.bind(this));
       return this;
+    },
+
+    /* ---------- post-processing ----------
+       A bright-pass + blur composited back additively. Every glow, every
+       neon edge, every muzzle flash gets real bloom out of it, which is
+       most of the difference between "shapes on a background" and "light". */
+    initPost: function () {
+      this.postOn = true;
+      this.bloomScale = 3;
+      var bw = Math.ceil(VIEW_W / this.bloomScale), bh = Math.ceil(VIEW_H / this.bloomScale);
+      this.bloomCv = document.createElement('canvas');
+      this.bloomCv.width = bw; this.bloomCv.height = bh;
+      this.bloomCtx = this.bloomCv.getContext('2d');
+      this.bloomAmt = 0.45;
+
+      // one tile of static, shifted every frame — analog noise for free
+      var g = document.createElement('canvas');
+      g.width = 128; g.height = 128;
+      var gc = g.getContext('2d');
+      var img = gc.createImageData(128, 128), d = img.data;
+      for (var i = 0; i < 128 * 128; i++) {
+        var v = Math.random() * 255;
+        d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = v;
+        d[i * 4 + 3] = 14;
+      }
+      gc.putImageData(img, 0, 0);
+      this.grainCv = g;
+    },
+
+    post: function () {
+      if (!this.postOn || this.postDone) return;
+      this.postDone = true;
+      var c = this.ctx, b = this.bloomCtx;
+      var bw = this.bloomCv.width, bh = this.bloomCv.height;
+      try {
+        b.setTransform(1, 0, 0, 1, 0, 0);
+        b.globalCompositeOperation = 'source-over';
+        b.clearRect(0, 0, bw, bh);
+        b.filter = 'brightness(1.05) contrast(3.4) blur(2px)';
+        b.drawImage(this.canvas, 0, 0, bw, bh);
+        b.filter = 'none';
+        c.save();
+        c.globalCompositeOperation = 'lighter';
+        c.globalAlpha = this.bloomAmt;
+        c.imageSmoothingEnabled = true;
+        c.drawImage(this.bloomCv, 0, 0, VIEW_W, VIEW_H);
+        c.imageSmoothingEnabled = false;
+        c.restore();
+      } catch (e) { this.postOn = false; }
+
+      // grain, drifting so it never looks like a stuck texture
+      c.save();
+      c.globalAlpha = 0.34;
+      var ox = -Math.floor(Math.random() * 128), oy = -Math.floor(Math.random() * 128);
+      for (var x = ox; x < VIEW_W; x += 128) {
+        for (var y = oy; y < VIEW_H; y += 128) c.drawImage(this.grainCv, x, y);
+      }
+      c.restore();
     },
 
     resize: function () {
@@ -226,11 +304,13 @@ html, body {
       c.setTransform(1, 0, 0, 1, 0, 0);
       c.fillStyle = PAL.void;
       c.fillRect(0, 0, VIEW_W, VIEW_H);
+      this.postDone = false;
       c.translate(Math.round(this.shakeX), Math.round(this.shakeY));
     },
     end: function () {
       var c = this.ctx;
       c.setTransform(1, 0, 0, 1, 0, 0);
+      this.post();
       if (this.flashT > 0) {
         c.globalAlpha = clamp(this.flashAlpha * this.flashT * 6, 0, 1);
         c.fillStyle = this.flashColor;
@@ -706,6 +786,529 @@ html, body {
   global.RA.Audio = A;
 })(window);
 
+/* ===== src/engine/sprites.js ===== */
+/* =============================================================
+   engine/sprites.js — the asset pipeline.
+
+   There are no image files in this project and there cannot be
+   (the page ships as one file). So the art is authored as pixel
+   maps, assembled on a 2D skeleton, and BAKED into offscreen
+   canvases once at boot: pose the rig, composite the parts, run
+   an auto-outline and a rim-light pass over the result, keep the
+   canvas. At runtime every character is a single drawImage.
+
+   Authoring a part: rows of characters, one char per pixel.
+     '.' transparent   '1' light   '2' mid   '3' dark
+     '5' glow          '6' glow hot   '7' deep shadow
+   Palettes are swapped per character, which is how the same rig
+   gives us G.One, a Random Access sentry and an Akashi Mask —
+   fitting, since in the fiction they are all avatars off one
+   motion-capture rig anyway.
+   ============================================================= */
+(function (global) {
+  'use strict';
+  var RA = global.RA, C = RA.core;
+  var D2R = Math.PI / 180;
+
+  /* ---------------- palettes ---------------- */
+  var PALETTES = {
+    gone:   { '1': '#f4f9ff', '2': '#c6d3e6', '3': '#6d7e99', '4': '#39465c',
+              '5': '#38d8ff', '6': '#c4f6ff', '7': '#0b1220' },
+    goneLo: { '1': '#c9d6e8', '2': '#9dacc4', '3': '#55637c', '4': '#2b3648',
+              '5': '#1f89ad', '6': '#61b9d4', '7': '#0b1220' },
+    raone:  { '1': '#39405280', '2': '#262c3a', '3': '#151a24', '4': '#0d1119',
+              '5': '#ff2f45', '6': '#ffd0d6', '7': '#05070c' },
+    sentry: { '1': '#8f9db5', '2': '#5c6a82', '3': '#333e52', '4': '#1d2534',
+              '5': '#ff3a4e', '6': '#ffc2c8', '7': '#080c14' },
+    mask:   { '1': '#6d5a82', '2': '#4a3a5c', '3': '#2c2238', '4': '#181222',
+              '5': '#ff3fd0', '6': '#ffcdf3', '7': '#0a0610' },
+    ghost:  { '1': '#2a3346', '2': '#212a3a', '3': '#19202c', '4': '#131923',
+              '5': '#3a4a66', '6': '#5a6d8c', '7': '#0a0e16' }
+  };
+  // raone '1' carried an alpha by mistake in authoring; keep it opaque
+  PALETTES.raone['1'] = '#394052';
+
+  /* ---------------- part art ---------------- */
+  var ART = {
+    /* --- shared humanoid limbs, cut to game scale: a character
+           stands about two tiles tall, which is what a 16px world wants --- */
+    upperArm: [
+      '3333',
+      '3113',
+      '3223',
+      '3113',
+      '3223',
+      '.33.'
+    ],
+    foreArm: [
+      '.33.',
+      '3113',
+      '3223',
+      '3113',
+      '3553',
+      '.33.'
+    ],
+    thigh: [
+      '33333',
+      '31113',
+      '32213',
+      '31113',
+      '31113',
+      '32213',
+      '.333.'
+    ],
+    shin: [
+      '.333.',
+      '31113',
+      '32213',
+      '31113',
+      '31113',
+      '35553',
+      '33333',
+      '31113',
+      '.333.'
+    ],
+    pelvis: [
+      '33333333',
+      '32111123',
+      '32222223',
+      '.333333.'
+    ],
+
+    /* --- G.One: helmet with a lit visor, core in the chest --- */
+    goneHead: [
+      '...3333...',
+      '.33111133.',
+      '3111111113',
+      '3315555513',
+      '3316666613',
+      '3111111113',
+      '.31111113.',
+      '..333333..',
+      '....22....'
+    ],
+    goneTorso: [
+      '..33333333..',
+      '.3111111113.',
+      '311111111113',
+      '311155551113',
+      '311156651113',
+      '311155551113',
+      '311111111113',
+      '321111111123',
+      '332211112233',
+      '.3322222233.',
+      '..33333333..'
+    ],
+
+    /* --- Ra.One: no face, a scan band where one should be, and
+           a cape that reads wider than the body --- */
+    raHead: [
+      '...3333...',
+      '.33222233.',
+      '3222222223',
+      '3325555523',
+      '3322222223',
+      '3222222223',
+      '.32222223.',
+      '..333333..',
+      '....22....'
+    ],
+    raTorso: [
+      '..3333333333..',
+      '.332222222233.',
+      '33222222222233',
+      '32221111122223',
+      '32215555512223',
+      '32215665512223',
+      '32215555512223',
+      '32221111122223',
+      '33222222222233',
+      '.332222222233.',
+      '..3333333333..',
+      '...32222223...'
+    ],
+    raCape: [
+      '...3333333333...',
+      '..333333333333..',
+      '.33333333333333.',
+      '3333333333333333',
+      '3333333333333333',
+      '3334444444443333',
+      '3333333333333333',
+      '3333333333333333',
+      '3333333333333333',
+      '.33333333333333.',
+      '.33333333333333.',
+      '..333333333333..',
+      '..3333333333 3..',
+      '..3.3.333.3.3...',
+      '.3..3..3..3..3..'
+    ],
+
+    /* --- enemy heads --- */
+    sentryHead: [
+      '...3333...',
+      '.33222233.',
+      '3222222223',
+      '3321555523',
+      '3322222223',
+      '3222222223',
+      '.32222223.',
+      '..333333..',
+      '....22....'
+    ],
+    maskHead: [
+      '...3333...',
+      '.33111133.',
+      '3111111113',
+      '3155555513',
+      '3115555113',
+      '3111111113',
+      '.31551113.',
+      '..333333..',
+      '....22....'
+    ],
+
+    /* --- non-rigged props --- */
+    drone: [
+      '....333333....',
+      '..3311111133..',
+      '.331222222133.',
+      '33122222222133',
+      '.331255552133.',
+      '..3312222133..',
+      '....333333....'
+    ],
+    droneWing: [
+      '3333',
+      '3113',
+      '.33.'
+    ],
+    turret: [
+      '..33333333..',
+      '.3311111133.',
+      '331222222133',
+      '331255552133',
+      '331222222133',
+      '333333333333',
+      '.3322222233.',
+      '..33333333..'
+    ],
+    hartShard: [
+      '....55....',
+      '....65....',
+      '..5.66.5..',
+      '.556666555',
+      '5566666655',
+      '.556666555',
+      '..5.66.5..',
+      '....65....',
+      '....55....'
+    ],
+    repairCell: [
+      '..333333..',
+      '.31111113.',
+      '3115115113',
+      '3111111113',
+      '3555555553',
+      '3111111113',
+      '3115115113',
+      '.31111113.',
+      '..333333..'
+    ],
+    dataShard: [
+      '..3333..',
+      '.311113.',
+      '31555513',
+      '31511513',
+      '31511513',
+      '31555513',
+      '.311113.',
+      '..3333..'
+    ]
+  };
+
+  /* ---------------- pixel painting ---------------- */
+  function hexToRgb(h) {
+    h = h.replace('#', '');
+    if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+    return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+  }
+  function canvas(w, h) {
+    var cv = document.createElement('canvas');
+    cv.width = Math.max(1, w | 0); cv.height = Math.max(1, h | 0);
+    var cx = cv.getContext('2d');
+    cx.imageSmoothingEnabled = false;
+    return cv;
+  }
+  function paint(art, pal) {
+    var h = art.length, w = art[0].length;
+    var cv = canvas(w, h), cx = cv.getContext('2d');
+    var img = cx.createImageData(w, h), d = img.data;
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        var ch = art[y][x];
+        if (ch === '.' || !pal[ch]) continue;
+        var rgb = hexToRgb(pal[ch]), i = (y * w + x) * 4;
+        d[i] = rgb[0]; d[i + 1] = rgb[1]; d[i + 2] = rgb[2]; d[i + 3] = 255;
+      }
+    }
+    cx.putImageData(img, 0, 0);
+    return cv;
+  }
+
+  /* one outline pass + one rim-light pass turns assembled parts
+     into something that reads as a single drawn character */
+  function finish(cv, outline, rim) {
+    var w = cv.width, h = cv.height, cx = cv.getContext('2d');
+    var img = cx.getImageData(0, 0, w, h), d = img.data;
+    var src = new Uint8ClampedArray(d);
+    var oc = hexToRgb(outline), rc = rim ? hexToRgb(rim) : null;
+    function a(x, y) {
+      if (x < 0 || y < 0 || x >= w || y >= h) return 0;
+      return src[(y * w + x) * 4 + 3];
+    }
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        var i = (y * w + x) * 4;
+        if (src[i + 3] === 0) {
+          // silhouette outline
+          if (a(x - 1, y) || a(x + 1, y) || a(x, y - 1) || a(x, y + 1)) {
+            d[i] = oc[0]; d[i + 1] = oc[1]; d[i + 2] = oc[2]; d[i + 3] = 235;
+          }
+        } else if (rc && !a(x, y - 1)) {
+          // top-lit rim: mix 45% toward the rim colour
+          d[i] = d[i] + (rc[0] - d[i]) * 0.45;
+          d[i + 1] = d[i + 1] + (rc[1] - d[i + 1]) * 0.45;
+          d[i + 2] = d[i + 2] + (rc[2] - d[i + 2]) * 0.45;
+        }
+      }
+    }
+    cx.putImageData(img, 0, 0);
+    return cv;
+  }
+
+  /* ---------------- the rig ---------------- */
+  /* pose format, all angles in degrees, 0 = limb hanging straight down:
+     { dy, torso, head, armB:[shoulder,elbow], armF:[...],
+       legB:[hip,knee], legF:[...] }                                    */
+  function P(dy, torso, head, aB, aF, lB, lF) {
+    return { dy: dy, torso: torso, head: head, armB: aB, armF: aF, legB: lB, legF: lF };
+  }
+
+  var ANIMS = {
+    idle: [
+      P(0, 2, -1, [6, 8], [-6, 10], [1, -1], [-1, 1]),
+      P(1, 3, 0, [8, 10], [-4, 12], [1, 0], [-1, 2])
+    ],
+    run: [
+      P(0, 9, -4, [-40, -34], [34, -22], [26, -52], [-38, 12]),
+      P(1, 8, -3, [-18, -28], [14, -16], [22, -18], [-12, 38]),
+      P(0, 7, -2, [10, -22], [-12, -12], [-4, -6], [18, -12]),
+      P(0, 9, -4, [34, -22], [-38, -32], [-38, 12], [26, -52]),
+      P(1, 8, -3, [14, -16], [-18, -28], [-12, 38], [22, -18]),
+      P(0, 7, -2, [-12, -12], [10, -22], [18, -12], [-4, -6])
+    ],
+    jump: [P(-1, -8, 5, [-96, -30], [-84, -34], [16, -46], [-28, 44])],
+    fall: [P(1, 6, -6, [-58, -20], [-66, -26], [-20, -12], [22, -22])],
+    punch: [
+      P(0, -12, -6, [46, -60], [64, -78], [8, -8], [-14, 10]),
+      P(0, 16, 4, [58, -50], [-96, 6], [12, -12], [-24, 16])
+    ],
+    dash: [P(2, -26, 12, [116, -30], [104, -26], [46, -34], [62, -40])],
+    hurt: [P(-1, -20, -14, [-72, -40], [-84, -30], [-16, 22], [24, -18])],
+    aim:  [P(0, -4, 0, [22, -18], [-92, -4], [6, -6], [-10, 8])],
+    cast: [
+      P(0, -8, -4, [30, -40], [-70, -50], [8, -8], [-12, 10]),
+      P(0, -2, -2, [26, -30], [-100, -8], [10, -10], [-14, 12])
+    ]
+  };
+
+  function bakeRig(def) {
+    var pal = PALETTES[def.palette];
+    var parts = {
+      head: paint(ART[def.head], pal),
+      torso: paint(ART[def.torso], pal),
+      upperArm: paint(ART.upperArm, pal),
+      foreArm: paint(ART.foreArm, pal),
+      thigh: paint(ART.thigh, pal),
+      shin: paint(ART.shin, pal),
+      cape: def.cape ? paint(ART[def.cape], pal) : null,
+      pelvis: paint(ART.pelvis, pal)
+    };
+    var palBack = PALETTES[def.backPalette || def.palette];
+    var back = {
+      upperArm: paint(ART.upperArm, palBack),
+      foreArm: paint(ART.foreArm, palBack),
+      thigh: paint(ART.thigh, palBack),
+      shin: paint(ART.shin, palBack)
+    };
+
+    var W = def.w || 34, H = def.h || 46;
+    var hipX = W / 2, hipY = def.hipY || 30;
+    var tH = parts.torso.height, tW = parts.torso.width;
+    var shoulderY = -tH + 3, shoulderX = tW / 2 - 1;
+    var out = {};
+
+    function limb(cx, upper, fore, ang) {
+      cx.save();
+      cx.rotate(ang[0] * D2R);
+      cx.drawImage(upper, -upper.width / 2, -1);
+      cx.translate(0, upper.height - 2);
+      cx.rotate(ang[1] * D2R);
+      cx.drawImage(fore, -fore.width / 2, -1);
+      cx.restore();
+    }
+
+    for (var name in ANIMS) {
+      out[name] = ANIMS[name].map(function (p) {
+        var cv = canvas(W, H), cx = cv.getContext('2d');
+        cx.imageSmoothingEnabled = false;
+        cx.translate(hipX, hipY + p.dy);
+
+        // cape hangs behind everything
+        if (parts.cape) {
+          cx.save();
+          cx.rotate((p.torso * 0.6) * D2R);
+          cx.drawImage(parts.cape, -parts.cape.width / 2, -tH + 2);
+          cx.restore();
+        }
+        // back leg, back arm
+        cx.save(); cx.translate(-2, 0);
+        limb(cx, back.thigh, back.shin, p.legB);
+        cx.restore();
+
+        cx.save();
+        cx.rotate(p.torso * D2R);
+        cx.translate(-shoulderX + 1, shoulderY);
+        limb(cx, back.upperArm, back.foreArm, p.armB);
+        cx.restore();
+
+        // pelvis covers the hip joins whatever the legs are doing
+        cx.drawImage(parts.pelvis, -parts.pelvis.width / 2, -3);
+
+        // torso + head
+        cx.save();
+        cx.rotate(p.torso * D2R);
+        cx.drawImage(parts.torso, -tW / 2, -tH);
+        cx.save();
+        cx.translate(0, -tH + 2);
+        cx.rotate(p.head * D2R);
+        cx.drawImage(parts.head, -parts.head.width / 2, -parts.head.height + 2);
+        cx.restore();
+        cx.restore();
+
+        // front leg, front arm
+        cx.save(); cx.translate(2, 0);
+        limb(cx, parts.thigh, parts.shin, p.legF);
+        cx.restore();
+
+        cx.save();
+        cx.rotate(p.torso * D2R);
+        cx.translate(shoulderX - 1, shoulderY);
+        limb(cx, parts.upperArm, parts.foreArm, p.armF);
+        cx.restore();
+
+        return finish(cv, def.outline || '#05070d', def.rim);
+      });
+    }
+    out.w = W; out.h = H;
+    out.footY = hipY + (parts.thigh.height + parts.shin.height - 4);
+    return out;
+  }
+
+  function bakeProp(artName, palName, opts) {
+    opts = opts || {};
+    var cv = paint(ART[artName], PALETTES[palName]);
+    return finish(cv, opts.outline || '#05070d', opts.rim);
+  }
+
+  /* ---------------- the library ---------------- */
+  var SHEETS = {}, PROPS = {}, ready = false;
+
+  function build() {
+    if (ready) return SHEETS;
+    SHEETS.gone = bakeRig({
+      palette: 'gone', backPalette: 'goneLo',
+      head: 'goneHead', torso: 'goneTorso',
+      w: 28, h: 40, hipY: 21, outline: '#070c16', rim: '#ffffff'
+    });
+    SHEETS.raone = bakeRig({
+      palette: 'raone', head: 'raHead', torso: 'raTorso', cape: 'raCape',
+      w: 36, h: 48, hipY: 25, outline: '#02040a', rim: '#7d8aa6'
+    });
+    SHEETS.sentry = bakeRig({
+      palette: 'sentry', head: 'sentryHead', torso: 'goneTorso',
+      w: 28, h: 40, hipY: 21, outline: '#04070e', rim: '#b9c6da'
+    });
+    SHEETS.mask = bakeRig({
+      palette: 'mask', head: 'maskHead', torso: 'goneTorso',
+      w: 28, h: 40, hipY: 21, outline: '#06030c', rim: '#c99ee0'
+    });
+    SHEETS.ghost = bakeRig({
+      palette: 'ghost', head: 'raHead', torso: 'raTorso', cape: 'raCape',
+      w: 36, h: 48, hipY: 25, outline: '#070b14', rim: '#3d4a63'
+    });
+
+    PROPS.drone = bakeProp('drone', 'sentry', { rim: '#aebbd0' });
+    PROPS.droneWing = bakeProp('droneWing', 'sentry');
+    PROPS.turret = bakeProp('turret', 'sentry', { rim: '#aebbd0' });
+    PROPS.hartShard = bakeProp('hartShard', 'gone');
+    PROPS.repairCell = bakeProp('repairCell', 'gone');
+    PROPS.dataShard = bakeProp('dataShard', 'gone');
+
+    ready = true;
+    return SHEETS;
+  }
+
+  /* draw a baked frame, anchored at the character's feet */
+  function draw(sheet, anim, frame, x, y, flip, opts) {
+    opts = opts || {};
+    var frames = sheet[anim] || sheet.idle;
+    var cv = frames[Math.abs(Math.floor(frame)) % frames.length];
+    var cx = C.Gfx.ctx;
+    cx.save();
+    if (opts.alpha !== undefined) cx.globalAlpha = opts.alpha;
+    // anchored at the feet, horizontally centred — so turning around
+    // does not shift the character by a frame width
+    var sc = opts.scale || 1;
+    cx.translate(Math.round(x - sheet.w * sc / 2), Math.round(y - sheet.footY * sc));
+    if (sc !== 1) cx.scale(sc, sc);
+    if (flip < 0) { cx.scale(-1, 1); cx.translate(-sheet.w, 0); }
+    if (opts.flash) {
+      // white-hot silhouette on the frame you land a hit
+      cx.drawImage(cv, 0, 0);
+      cx.globalCompositeOperation = 'source-atop';
+      cx.fillStyle = opts.flash;
+      cx.globalAlpha = (opts.alpha === undefined ? 1 : opts.alpha) * 0.85;
+      cx.fillRect(0, 0, sheet.w, sheet.h);
+    } else {
+      cx.drawImage(cv, 0, 0);
+    }
+    cx.restore();
+  }
+
+  function drawProp(name, x, y, opts) {
+    opts = opts || {};
+    var cv = PROPS[name];
+    if (!cv) return;
+    var cx = C.Gfx.ctx;
+    cx.save();
+    if (opts.alpha !== undefined) cx.globalAlpha = opts.alpha;
+    cx.translate(Math.round(x - cv.width / 2), Math.round(y - cv.height / 2));
+    if (opts.flip < 0) { cx.scale(-1, 1); cx.translate(-cv.width, 0); }
+    cx.drawImage(cv, 0, 0);
+    cx.restore();
+  }
+
+  RA.spr = {
+    build: build, draw: draw, drawProp: drawProp,
+    sheets: SHEETS, props: PROPS, palettes: PALETTES,
+    paint: paint, finish: finish, canvas: canvas, ART: ART
+  };
+})(window);
+
 /* ===== src/data/lore.js ===== */
 /* =============================================================
    data/lore.js — the CODEX.
@@ -771,17 +1374,22 @@ html, body {
     { cat: 'THE GAME', title: 'RULE 3 — ESCALATION',
       body: 'The power of the H.A.R.T. increases with every level. So does everything it is ' +
             'pointed at.' },
-    { cat: 'THE GAME', title: 'RULE 4 — THE ONE BULLET',
+    { cat: 'THE GAME', title: 'RULE 4 — THE ONE BULLET', boss: true,
       body: 'A player can be killed only in the third level, only by the anti-H.A.R.T. gun, and ' +
             'only while his H.A.R.T. is ATTACHED. The gun holds exactly one bullet. Fire it at a ' +
             'player whose H.A.R.T. is detached and it is spent forever.', shard: true },
-    { cat: 'THE GAME', title: 'THE TRICK',
+    { cat: 'THE GAME', title: 'THE TRICK', boss: true,
       body: 'G.One and Prateek let Ra.One take his shot — with the H.A.R.T. detached. The single ' +
             'round passes through a target it cannot kill. Ra.One, disarmed and enraged, splits ' +
             'into ten copies of himself.', shard: true },
-    { cat: 'THE GAME', title: 'THE SHADOW',
+    { cat: 'THE GAME', title: 'THE SHADOW', boss: true,
       body: 'Ten identical Ra.Ones, and no way to tell them apart — until they see it: only the ' +
             'original casts a shadow. The copies are light with nothing behind them.', shard: true },
+    { cat: 'THE GAME', title: 'RAVAN, TEN TIMES',
+      body: 'Shah Rukh Khan on the design: Ra.One is "the modern, new-age technology version ' +
+            'of our mythological Raavan, who was a mixture of ten different evil characters." ' +
+            'That is why the villain has no face, and it is why there are exactly ten of him at ' +
+            'the end. The ten heads are watching you in the third level.', shard: true },
     { cat: 'THE GAME', title: 'THE CROSSING',
       body: 'Ra.One is not hacked out or summoned. He uses the Barron transfer technology to walk ' +
             'out of the game over a wireless signal, into the real world, hunting a login name.' },
@@ -805,6 +1413,12 @@ html, body {
     { cat: 'THE FILM', title: 'BOX OFFICE',
       body: 'Over Rs 207 crore. Second highest-grossing Bollywood film of 2011 worldwide, third ' +
             'domestically, and the holder of several opening-weekend records.' },
+    { cat: 'THE FILM', title: 'WHAT PEOPLE SAID',
+      body: 'The reception was loudly split. Praised: the visual effects, the action, the music, ' +
+            'and the performances — plenty of viewers still call it the best-looking Indian ' +
+            'sci-fi of its moment. Criticised: the script, the plot holes, and a middle stretch ' +
+            'that sags. And one complaint comes up more than any other — that Arjun Rampal\'s ' +
+            'Ra.One, the best thing in the film, is barely in it.' },
     { cat: 'THE FILM', title: 'LOCATIONS',
       body: 'Principal photography began March 2010 across India and the United Kingdom. London ' +
             'for Barron Industries; Mumbai for the second half — including the runaway local and ' +
@@ -841,6 +1455,18 @@ html, body {
       body: 'LUCIFER PROTOCOL is an unofficial, non-commercial fan game. No footage, audio, art ' +
             'or code from the film or its tie-in game is used. Every sprite here is drawn with ' +
             'rectangles at runtime.' },
+    { cat: 'CABINET', title: 'THE COMPLAINT WE FIXED',
+      body: 'Since the thing audiences wanted more of was the villain, he is not saved for the ' +
+            'end here. He watches you from the rooftops and the coach ends across the whole ' +
+            'level. Twice a level he phases in beside you, asks where Lucifer is, takes a swing ' +
+            'and leaves — and you cannot kill him, because a player can only be killed in the ' +
+            'third level. That rule was already in the film. We just pointed it at the pacing.' },
+    { cat: 'CABINET', title: 'HOW THE ART IS MADE',
+      body: 'There are no image files. Characters are pixel maps assembled on a 2D skeleton and ' +
+            'baked into offscreen canvases at boot — pose the rig, composite the parts, run an ' +
+            'auto-outline and a rim-light pass, keep the frame. At runtime a character is one ' +
+            'drawImage. Tiles are baked the same way. The glow is a real bright-pass bloom over ' +
+            'the whole frame, which is why light behaves like light.' },
     { cat: 'CABINET', title: 'WHY IT LOOKS LIKE THIS',
       body: '640x360 internal resolution, integer-scaled, scanlines on top. Not because 2011 ' +
             'looked like this — because being eleven and standing in front of a cabinet did.' },
@@ -1013,6 +1639,7 @@ html, body {
     put(g, 97, 12, 'd');
 
     row(g, 103, 108, 15, '=');
+    put(g, 105, 14, 'd');
     box(g, 110, FLOOR - 4, 113, FLOOR - 1, '#');
     row(g, 116, 121, 12, '=');
     put(g, 119, 11, 'h');
@@ -1048,6 +1675,8 @@ html, body {
       boss: 'ra1',
       bossX: 144, arenaX: 129,
       hartMax: 100,
+      stalkers: [[30, 12, 0.50], [76, 11, 0.44], [124, 12, 0.56]],
+      incursions: [58, 108],
       story: 'l1'
     };
   }
@@ -1116,6 +1745,8 @@ html, body {
       autoScroll: 1.15,
       timer: 100,
       hartMax: 130,
+      stalkers: [[42, 11, 0.48], [98, 10, 0.42], [152, 11, 0.52]],
+      incursions: [64, 128],
       story: 'l2'
     };
   }
@@ -1314,71 +1945,43 @@ html, body {
     if (world.game) world.game.addScore(this.score);
   };
 
-  /* ================= SPRITE DRAWING =================
-     Everything is drawn from rectangles at runtime. No image assets. */
-  function figure(sx, sy, o) {
-    // o: {w,h,face,phase,state,suit,trim,glow,eye,core,alpha,shadow}
-    var w = o.w || 14, h = o.h || 24, f = o.face || 1;
-    var ph = o.phase || 0, st = o.state || 'idle';
-    var c = Gfx.ctx;
-    if (o.alpha !== undefined) c.globalAlpha = o.alpha;
+  /* ================= SPRITE ACCESS =================
+     Frames are baked once at boot by engine/sprites.js; drawing a
+     character is one drawImage of a pre-composited pixel canvas. */
+  var SH = null;
+  function sheets() { return SH || (SH = global.RA.spr.build()); }
 
-    var bob = st === 'run' ? Math.round(Math.sin(ph * 2) * 1) : (st === 'idle' ? Math.round(Math.sin(ph * 0.6)) : 0);
-    var top = sy + bob;
-    var headH = Math.round(h * 0.26), torsoH = Math.round(h * 0.40), legH = h - headH - torsoH;
-    var bodyW = Math.round(w * 0.62), bx = sx + Math.round((w - bodyW) / 2);
-
-    // legs
-    var swing = st === 'run' ? Math.sin(ph * 2) * (w * 0.22)
-              : (st === 'jump' ? -w * 0.12 : (st === 'fall' ? w * 0.10 : 0));
-    var legW = Math.max(3, Math.round(bodyW * 0.38));
-    Gfx.rect(bx + swing, top + headH + torsoH, legW, legH, o.suit);
-    Gfx.rect(bx + bodyW - legW - swing, top + headH + torsoH, legW, legH, o.suit);
-    Gfx.rect(bx + swing, top + h - 2, legW, 2, o.trim);
-    Gfx.rect(bx + bodyW - legW - swing, top + h - 2, legW, 2, o.trim);
-
-    // torso
-    Gfx.rect(bx, top + headH, bodyW, torsoH, o.suit);
-    // suit seams
-    Gfx.rect(bx + 1, top + headH + 1, 1, torsoH - 2, o.trim);
-    Gfx.rect(bx + bodyW - 2, top + headH + 1, 1, torsoH - 2, o.trim);
-    Gfx.rect(bx, top + headH + torsoH - 2, bodyW, 1, o.trim);
-
-    // arms
-    var aSwing = st === 'run' ? -Math.sin(ph * 2) * (w * 0.20) : 0;
-    var armW = Math.max(2, Math.round(bodyW * 0.28));
-    if (st === 'attack') {
-      var reach = Math.round(w * (o.punchExt || 0.55));
-      Gfx.rect(f > 0 ? bx + bodyW : bx - reach, top + headH + 3, reach, armW, o.suit);
-      Gfx.rect(f > 0 ? bx + bodyW + reach - 2 : bx - reach, top + headH + 2, 2, armW + 2, o.trim);
-    } else {
-      Gfx.rect(bx - armW + 1 + aSwing, top + headH + 2, armW, Math.round(torsoH * 0.7), o.suit);
-      Gfx.rect(bx + bodyW - 1 - aSwing, top + headH + 2, armW, Math.round(torsoH * 0.7), o.suit);
+  /* pick the animation and frame for any rigged actor */
+  function poseOf(a) {
+    if (a.dashT > 0) return ['dash', 0];
+    if (a.attackT > 0 || a.strikeT > 0 || a.lungeT > 0) {
+      var t = a.attackT || a.strikeT || a.lungeT;
+      return ['punch', t > 0.16 ? 0 : 1];
     }
+    if (a.hurtT > 0) return ['hurt', 0];
+    if (!a.onGround) return [a.vy < 0 ? 'jump' : 'fall', 0];
+    if (Math.abs(a.vx) > 0.45) return ['run', Math.floor(a.anim)];
+    return ['idle', Math.floor(a.anim * 0.35)];
+  }
 
-    // head
-    var hw = Math.round(w * 0.5), hx = sx + Math.round((w - hw) / 2);
-    Gfx.rect(hx, top, hw, headH, o.suit);
-    if (o.eye) {
-      var ey = top + Math.round(headH * 0.42);
-      Gfx.rect(f > 0 ? hx + hw - 3 : hx + 1, ey, 2, 2, o.eye);
-      if (o.visor) Gfx.rect(hx, ey, hw, 1, o.eye);
+  /* a contact shadow that tightens as you approach the floor */
+  function contactShadow(a, world, cam) {
+    var ty = Math.floor((a.y + a.h + 2) / T), gy = null;
+    for (var k = 0; k < 12; k++) {
+      var t = a.y + a.h + k * T;
+      if (world.isSolid(Math.floor(a.cx() / T), Math.floor(t / T))) {
+        gy = Math.floor(t / T) * T; break;
+      }
     }
-    if (o.faceless) {
-      Gfx.rect(hx, top + 1, hw, headH - 2, o.suit);
-      Gfx.rect(hx + 1, top + Math.round(headH * 0.4), hw - 2, 1, o.trim);
-    }
-
-    // the H.A.R.T. core
-    if (o.core) {
-      var ccx = bx + bodyW / 2, ccy = top + headH + Math.round(torsoH * 0.38);
-      var pulse = 0.6 + 0.4 * Math.sin(ph * 3);
-      Gfx.glow(ccx, ccy, 9 + pulse * 4, o.glow, 0.5 * o.coreLevel);
-      Gfx.rect(ccx - 2, ccy - 2, 4, 4, o.glow);
-      Gfx.rect(ccx - 1, ccy - 3, 2, 6, o.glow);
-      Gfx.rect(ccx - 3, ccy - 1, 6, 2, o.glow);
-    }
-    if (o.alpha !== undefined) c.globalAlpha = 1;
+    if (gy === null) return;
+    var drop = C.clamp((gy - (a.y + a.h)) / 90, 0, 1);
+    var w = (a.w + 4) * (1 - drop * 0.55);
+    Gfx.ctx.globalAlpha = 0.42 * (1 - drop * 0.7);
+    Gfx.ctx.fillStyle = '#000';
+    Gfx.ctx.beginPath();
+    Gfx.ctx.ellipse(Math.round(a.cx() - cam.x), Math.round(gy - cam.y), w / 2, 2.5, 0, 0, Math.PI * 2);
+    Gfx.ctx.fill();
+    Gfx.ctx.globalAlpha = 1;
   }
 
   /* ================= PLAYER — G.ONE ================= */
@@ -1564,39 +2167,48 @@ html, body {
     world.parts.burst(this.cx(), this.cy(), 40, { color: PAL.hart, glow: true, smax: 4, lmax: 1.2 });
   };
 
-  Player.prototype.draw = function (cam) {
-    var x = Math.round(this.x - cam.x), y = Math.round(this.y - cam.y);
+  Player.prototype.draw = function (cam, world) {
+    var fx = Math.round(this.cx() - cam.x), fy = Math.round(this.y + this.h - cam.y);
     if (this.dead) {
-      // dissolve into fragments — the way he goes at the end
-      var t = Math.min(1, this.deathT / 1.2);
-      for (var i = 0; i < 16; i++) {
-        var a = i * 1.7 + this.deathT * 2;
-        Gfx.rectA(x + 6 + Math.cos(a) * t * 24, y + 12 + Math.sin(a) * t * 22, 3, 3, PAL.ra, 1 - t);
+      // he goes the way he goes: black fragments, and the core last
+      var t = Math.min(1, this.deathT / 1.4);
+      for (var i = 0; i < 22; i++) {
+        var a = i * 1.7 + this.deathT * 2, r = t * (18 + (i % 5) * 7);
+        Gfx.rectA(fx + Math.cos(a) * r, fy - 16 + Math.sin(a) * r * 0.8,
+                  3, 3, i % 3 ? '#141924' : PAL.steel, 1 - t);
       }
-      Gfx.glow(x + 6, y + 12, 16 * (1 - t), PAL.hart, 0.5 * (1 - t));
+      Gfx.glow(fx, fy - 16, 26 * (1 - t), PAL.hart, 0.6 * (1 - t));
       return;
     }
-    if (this.invuln > 0 && Math.floor(this.invuln * 20) % 2 === 0) return;   // i-frame blink
+    if (this.invuln > 0 && Math.floor(this.invuln * 20) % 2 === 0) return;
 
-    // ground shadow
-    Gfx.rectA(x + 1, this.groundY(cam), this.w - 2, 2, '#000', 0.35);
+    if (world) contactShadow(this, world, cam);
 
-    figure(x - 1, y, {
-      w: 14, h: 24, face: this.face, phase: this.anim, state: this.state,
-      suit: this.hurtT > 0 ? PAL.white : PAL.bone,
-      trim: this.hartDetached ? PAL.steelLite : PAL.hart,
-      glow: PAL.hart, eye: PAL.hart, visor: true,
-      core: !this.hartDetached, coreLevel: C.clamp(this.hart / this.hartMax, 0.15, 1),
-      punchExt: 0.5 + this.combo * 0.08
-    });
-
-    if (this.charge > 0.55) {
-      var cxp = x + (this.face > 0 ? 18 : -4);
-      Gfx.glow(cxp, y + 11, 10 + Math.sin(this.anim * 4) * 3, PAL.hartGlow, 0.7);
+    var pose = poseOf(this);
+    var trail = this.dashT > 0 || Math.abs(this.vx) > 3.4;
+    if (trail) {
+      for (var k = 1; k <= 3; k++) {
+        global.RA.spr.draw(sheets().gone, pose[0], pose[1],
+          fx - this.face * k * 5, fy, this.face, { alpha: 0.16 * (4 - k) / 3 });
+      }
     }
-    if (this.dashT > 0) Gfx.glow(x + 6, y + 12, 18, PAL.hart, 0.35);
+    global.RA.spr.draw(sheets().gone, pose[0], pose[1], fx, fy, this.face,
+      { flash: this.hurtT > 0 ? '#ffffff' : null });
+
+    // the H.A.R.T. throws real light while it is in his chest
+    if (!this.hartDetached) {
+      var lv = C.clamp(this.hart / this.hartMax, 0.2, 1);
+      var pulse = 0.75 + 0.25 * Math.sin(this.anim * 0.9);
+      Gfx.glow(fx, fy - 20, (13 + lv * 9) * pulse, PAL.hart, 0.38 * lv);
+      Gfx.glow(fx, fy - 20, 5, PAL.hartGlow, 0.5 * lv);
+    }
+    if (this.charge > 0.55) {
+      var cxp = fx + this.face * 13;
+      Gfx.glow(cxp, fy - 18, 9 + Math.sin(this.anim * 3) * 3, PAL.hartGlow, 0.8);
+      Gfx.ring(cxp, fy - 18, 7 + Math.sin(this.anim * 2) * 2, PAL.hart, 1, 0.7);
+    }
+    if (this.dashT > 0) Gfx.glow(fx, fy - 16, 22, PAL.hart, 0.4);
   };
-  Player.prototype.groundY = function (cam) { return Math.round(this.y + this.h - cam.y - 1); };
 
   /* the detached H.A.R.T., lying on the floor being important */
   Player.prototype.drawHart = function (cam, world) {
@@ -1604,11 +2216,10 @@ html, body {
     var o = this.hartObj;
     var x = Math.round(o.x - cam.x), y = Math.round(o.y - cam.y);
     var p = 0.6 + 0.4 * Math.sin(o.t * 5);
-    Gfx.glow(x, y, 14 + p * 8, PAL.hart, 0.55);
-    Gfx.rect(x - 3, y - 3, 6, 6, PAL.hartGlow);
-    Gfx.rect(x - 1, y - 6, 2, 12, PAL.hart);
-    Gfx.rect(x - 6, y - 1, 12, 2, PAL.hart);
-    Gfx.ring(x, y, 10 + p * 4, PAL.hart, 1, 0.5);
+    Gfx.glow(x, y, 16 + p * 10, PAL.hart, 0.6);
+    global.RA.spr.drawProp('hartShard', x, y + Math.sin(o.t * 2) * 1.5);
+    Gfx.ring(x, y, 11 + p * 5, PAL.hart, 1, 0.45);
+    Gfx.ring(x, y, 17 + p * 9, PAL.hart, 1, 0.18);
   };
   Player.prototype.updateHart = function (dt, world) {
     var o = this.hartObj; if (!o) return;
@@ -1666,21 +2277,22 @@ html, body {
   }
   Pickup.prototype.update = function (dt) { this.t += dt; };
   Pickup.prototype.draw = function (cam) {
-    var x = Math.round(this.x - cam.x + 6), y = Math.round(this.y - cam.y + 6 + Math.sin(this.t * 2.4) * 2);
+    var x = Math.round(this.x - cam.x + 6);
+    var y = Math.round(this.y - cam.y + 6 + Math.sin(this.t * 2.4) * 2.5);
+    var p = 0.5 + 0.5 * Math.sin(this.t * 3);
     if (this.kind === 'hart') {
-      Gfx.glow(x, y, 12, PAL.hart, 0.45);
-      Gfx.rect(x - 1, y - 5, 2, 10, PAL.hart); Gfx.rect(x - 5, y - 1, 10, 2, PAL.hart);
-      Gfx.rect(x - 2, y - 2, 4, 4, PAL.hartGlow);
+      Gfx.glow(x, y, 13 + p * 4, PAL.hart, 0.45);
+      global.RA.spr.drawProp('hartShard', x, y);
     } else if (this.kind === 'repair') {
-      Gfx.glow(x, y, 12, PAL.green, 0.4);
-      Gfx.rect(x - 5, y - 2, 10, 4, PAL.green); Gfx.rect(x - 2, y - 5, 4, 10, PAL.green);
+      Gfx.glow(x, y, 12, PAL.green, 0.35);
+      global.RA.spr.drawProp('repairCell', x, y);
+      Gfx.rectA(x - 4, y - 1, 8, 2, PAL.green, 0.9);
+      Gfx.rectA(x - 1, y - 4, 2, 8, PAL.green, 0.9);
     } else {
-      var p = 0.5 + 0.5 * Math.sin(this.t * 3);
-      Gfx.glow(x, y, 14, PAL.gold, 0.35 + p * 0.25);
-      Gfx.rect(x - 4, y - 5, 8, 10, PAL.amber);
-      Gfx.rect(x - 3, y - 4, 6, 8, PAL.gold);
-      Gfx.rect(x - 1, y - 3, 2, 6, PAL.void);
-      Gfx.ring(x, y, 9 + p * 3, PAL.gold, 1, 0.4);
+      Gfx.glow(x, y, 15 + p * 6, PAL.gold, 0.4 + p * 0.2);
+      global.RA.spr.drawProp('dataShard', x, y);
+      Gfx.ring(x, y, 9 + p * 4, PAL.gold, 1, 0.45);
+      Gfx.ring(x, y, 14 + p * 8, PAL.gold, 1, 0.18);
     }
   };
 
@@ -1716,15 +2328,13 @@ html, body {
     world.move(this, this.vx, this.vy);
     if (this.onGround) this.vx *= 0.86;
   };
-  Sentry.prototype.draw = function (cam) {
-    var x = Math.round(this.x - cam.x), y = Math.round(this.y - cam.y);
-    Gfx.rectA(x + 1, y + this.h - 1, this.w - 2, 2, '#000', 0.3);
-    figure(x - 1, y, {
-      w: 14, h: 24, face: this.face, phase: this.anim,
-      state: this.lungeT > 0 ? 'attack' : (Math.abs(this.vx) > 0.4 ? 'run' : 'idle'),
-      suit: this.hurtT > 0 ? PAL.white : PAL.steel, trim: PAL.raRed,
-      glow: PAL.raRed, eye: PAL.raRed, visor: true, core: false
-    });
+  Sentry.prototype.draw = function (cam, world) {
+    var fx = Math.round(this.cx() - cam.x), fy = Math.round(this.y + this.h - cam.y);
+    if (world) contactShadow(this, world, cam);
+    var pose = poseOf(this);
+    global.RA.spr.draw(sheets().sentry, pose[0], pose[1], fx, fy, this.face,
+      { flash: this.hurtT > 0 ? '#ffd7d7' : null });
+    Gfx.glow(fx, fy - 22, 7, PAL.raRed, 0.35);
   };
 
   /* RA-Drone — patrols the air, drops on you */
@@ -1764,14 +2374,18 @@ html, body {
     }
   };
   Drone.prototype.draw = function (cam) {
-    var x = Math.round(this.x - cam.x), y = Math.round(this.y - cam.y);
-    var w = this.w, s = Math.sin(this.anim) * 2;
-    Gfx.glow(x + w / 2, y + 6, 12, PAL.raRed, this.diveT > 0 ? 0.5 : 0.28);
-    Gfx.rect(x, y + 3, w, 6, this.hurtT > 0 ? PAL.white : PAL.steel);
-    Gfx.rect(x + 2, y + 1, w - 4, 3, PAL.steelLite);
-    Gfx.rect(x - 2, y + 4 + s, 3, 2, PAL.steelLite);
-    Gfx.rect(x + w - 1, y + 4 - s, 3, 2, PAL.steelLite);
-    Gfx.rect(x + (this.face > 0 ? w - 4 : 2), y + 5, 2, 2, PAL.raRed);
+    var cxp = Math.round(this.cx() - cam.x), cyp = Math.round(this.cy() - cam.y);
+    var s = Math.sin(this.anim * 2) * 2;
+    Gfx.glow(cxp, cyp, this.diveT > 0 ? 18 : 12, PAL.raRed, this.diveT > 0 ? 0.55 : 0.3);
+    global.RA.spr.drawProp('droneWing', cxp - 9, cyp + s, { flip: -1 });
+    global.RA.spr.drawProp('droneWing', cxp + 9, cyp - s);
+    global.RA.spr.drawProp('drone', cxp, cyp, { flip: this.face });
+    if (this.hurtT > 0) {
+      Gfx.rectA(cxp - 8, cyp - 4, 16, 8, '#ffffff', 0.7);
+    }
+    if (this.diveT > 0) {
+      Gfx.rectA(cxp - this.vx * 3, cyp - this.vy * 3, 2, 2, PAL.raRed, 0.6);
+    }
   };
 
   /* Akashi Mask — moves on the motion-capture Akashi recorded */
@@ -1808,16 +2422,20 @@ html, body {
     world.move(this, this.vx, this.vy);
     if (this.onGround) this.vx *= 0.8;
   };
-  Mask.prototype.draw = function (cam) {
-    var x = Math.round(this.x - cam.x), y = Math.round(this.y - cam.y);
-    Gfx.rectA(x + 1, y + this.h - 1, this.w - 2, 2, '#000', 0.3);
-    if (this.blinkT > 0) Gfx.glow(x + 6, y + 12, 16, PAL.magenta, 0.4);
-    figure(x - 1, y, {
-      w: 14, h: 24, face: this.face, phase: this.anim,
-      state: this.strikeT > 0 ? 'attack' : (Math.abs(this.vx) > 0.5 ? 'run' : 'idle'),
-      suit: this.hurtT > 0 ? PAL.white : '#3a2a44', trim: PAL.magenta,
-      glow: PAL.magenta, eye: PAL.magenta, faceless: true, core: false
-    });
+  Mask.prototype.draw = function (cam, world) {
+    var fx = Math.round(this.cx() - cam.x), fy = Math.round(this.y + this.h - cam.y);
+    if (world) contactShadow(this, world, cam);
+    var pose = poseOf(this);
+    if (this.blinkT > 0) {
+      Gfx.glow(fx, fy - 16, 20, PAL.magenta, 0.5);
+      for (var k = 1; k <= 2; k++) {
+        global.RA.spr.draw(sheets().mask, pose[0], pose[1],
+          fx - this.face * k * 9, fy, this.face, { alpha: 0.22 / k });
+      }
+    }
+    global.RA.spr.draw(sheets().mask, pose[0], pose[1], fx, fy, this.face,
+      { flash: this.hurtT > 0 ? '#ffffff' : null });
+    Gfx.glow(fx, fy - 24, 8, PAL.magenta, 0.35);
   };
 
   /* Firewall Turret — bolted to the floor, unimpressed */
@@ -1845,18 +2463,113 @@ html, body {
     }
   };
   Turret.prototype.draw = function (cam) {
-    var x = Math.round(this.x - cam.x), y = Math.round(this.y - cam.y);
-    Gfx.rect(x, y + 6, 12, 6, this.hurtT > 0 ? PAL.white : PAL.steel);
-    Gfx.rect(x + 2, y + 2, 8, 6, PAL.steelLite);
-    var bx = x + 6 + Math.cos(this.aim) * 7, by = y + 5 + Math.sin(this.aim) * 7;
-    Gfx.line(x + 6, y + 5, bx, by, PAL.raRed, 2);
-    Gfx.glow(x + 6, y + 5, 7, PAL.raRed, 0.3);
+    var cxp = Math.round(this.cx() - cam.x), cyp = Math.round(this.cy() - cam.y);
+    var bx = cxp + Math.cos(this.aim) * 9, by = cyp - 2 + Math.sin(this.aim) * 9;
+    Gfx.line(cxp, cyp - 2, bx, by, '#3d4a5f', 3);
+    Gfx.line(cxp, cyp - 2, bx, by, PAL.raRed, 1);
+    global.RA.spr.drawProp('turret', cxp, cyp);
+    if (this.hurtT > 0) Gfx.rectA(cxp - 6, cyp - 4, 12, 8, '#ffffff', 0.7);
+    Gfx.glow(bx, by, 6, PAL.raRed, 0.4 + (this.cool < 0.4 ? 0.4 : 0));
+  };
+
+  /* ================= RA.ONE INCURSION =================
+     The film's most common complaint is that its villain is barely in it.
+     So he interrupts you mid-level: phases in, asks his one question,
+     takes a swing, phases out. He cannot be killed here — a player can
+     only be killed in the third level, and so can he. */
+  function Incursion(x, y, game) {
+    Actor.call(this, x, y, 22, 40);
+    this.type = 'incursion';
+    this.game = game;
+    this.phase = 'in'; this.pt = 0; this.hits = 0;
+    this.cool = 0.9; this.act = null; this.actT = 0;
+    this.anim = 0; this.face = -1; this.score = 0;
+    this.invulnerable = true; this.contact = 11;
+  }
+  Incursion.prototype = Object.create(Actor.prototype);
+  Incursion.prototype.constructor = Incursion;
+
+  Incursion.prototype.damage = function (n, world) {
+    // you cannot hurt him, but you can make him lose interest
+    this.hits++;
+    this.hurtT = 0.1;
+    world.parts.burst(this.cx(), this.cy(), 6, { color: PAL.steelLite, smax: 2, lmax: 0.3 });
+    if (this.hits === 1 && this.game) this.game.toast('HE CANNOT BE KILLED HERE', PAL.steelLite);
+    if (this.hits > 9 && this.phase === 'act') { this.phase = 'out'; this.pt = 0; }
+    return false;
+  };
+
+  Incursion.prototype.update = function (dt, world, player) {
+    this.pt += dt; this.anim += dt * 8;
+    if (this.hurtT > 0) this.hurtT -= dt;
+    var dx = player.cx() - this.cx();
+    this.face = dx > 0 ? 1 : -1;
+
+    if (this.phase === 'in') {
+      if (this.pt > 0.7) { this.phase = 'act'; this.pt = 0; }
+      return;
+    }
+    if (this.phase === 'out') {
+      if (this.pt > 0.5) this.remove = true;
+      return;
+    }
+
+    // act
+    if (this.pt > 7.5) { this.phase = 'out'; this.pt = 0; return; }
+    this.vy = Math.min(this.vy + 0.46, 12);
+    if (this.act === 'rush') {
+      this.actT -= dt;
+      this.vx = this.face * 5.6;
+      if (this.actT <= 0 || this.hitWall) { this.act = null; this.hitWall = false; this.cool = 1.1; }
+    } else if (this.act === 'bolt') {
+      this.actT -= dt;
+      if (this.actT <= 0) {
+        Audio.sfx('blast');
+        for (var i = -1; i <= 1; i++) {
+          var a = Math.atan2(player.cy() - this.cy(), player.cx() - this.cx()) + i * 0.22;
+          world.spawnShot({ x: this.cx(), y: this.cy(), vx: Math.cos(a) * 4.2, vy: Math.sin(a) * 4.2,
+            w: 8, h: 5, dmg: 9, owner: 'enemy', color: PAL.raRed, life: 2.2 });
+        }
+        this.act = null; this.cool = 1.2;
+      }
+    } else {
+      this.vx = C.approach(this.vx, Math.abs(dx) > 90 ? this.face * 1.8 : 0, 0.25);
+      this.cool -= dt;
+      if (this.cool <= 0) {
+        if (Math.abs(dx) < 130 && Math.random() < 0.45) { this.act = 'rush'; this.actT = 0.5; }
+        else { this.act = 'bolt'; this.actT = 0.35; }
+      }
+    }
+    this.onGround = false;
+    world.move(this, this.vx, this.vy);
+    if (this.onGround && !this.act) this.vx *= 0.9;
+  };
+
+  Incursion.prototype.draw = function (cam, world) {
+    var fx = Math.round(this.cx() - cam.x), fy = Math.round(this.y + this.h - cam.y);
+    var a = 1;
+    if (this.phase === 'in') a = C.clamp(this.pt / 0.7, 0, 1);
+    if (this.phase === 'out') a = 1 - C.clamp(this.pt / 0.5, 0, 1);
+    if (a < 1) {
+      // materialising: torn scanlines resolving into a body
+      for (var i = 0; i < 10; i++) {
+        Gfx.rectA(fx - 20 + Math.random() * 40, fy - Math.random() * 44,
+                  18, 2, PAL.raSeam, 0.5 * (1 - a));
+      }
+    }
+    if (world && a > 0.9) contactShadow(this, world, cam);
+    var pose = this.act === 'rush' ? ['run', Math.floor(this.anim)]
+             : (this.act === 'bolt' ? ['cast', 1] : ['idle', Math.floor(this.anim * 0.35)]);
+    global.RA.bosses.drawRa(fx, fy, {
+      face: this.face, anim: pose[0], frame: pose[1],
+      hurt: this.hurtT > 0, alpha: a, trail: this.act === 'rush'
+    });
   };
 
   global.RA.ent = {
     World: World, Player: Player, Shot: Shot, Pickup: Pickup,
-    Sentry: Sentry, Drone: Drone, Mask: Mask, Turret: Turret,
-    Actor: Actor, figure: figure
+    Sentry: Sentry, Drone: Drone, Mask: Mask, Turret: Turret, Incursion: Incursion,
+    Actor: Actor, sheets: sheets, poseOf: poseOf, contactShadow: contactShadow
   };
 })(window);
 
@@ -1873,36 +2586,44 @@ html, body {
   var C = global.RA.core, Gfx = C.Gfx, PAL = C.PAL, T = C.TILE;
   var Audio = global.RA.Audio, ent = global.RA.ent;
 
-  function drawRa(x, y, o) {
+  /* Ra.One is drawn from the same baked rig as everything else, at a
+     larger scale, with his own black-and-seam palette and a cape. He
+     should read as bigger than you before you have read anything else. */
+  var RA_SCALE = 1.3;
+
+  function bossPose(b) {
+    if (b.aiming) return ['aim', 0];
+    if (b.act === 'charge' || b.act === 'rush') return ['run', Math.floor(b.anim)];
+    if (b.act) return ['cast', b.actT > 0.2 ? 0 : 1];
+    if (b.hurtT > 0.06) return ['hurt', 0];
+    if (!b.onGround) return [b.vy < 0 ? 'jump' : 'fall', 0];
+    if (Math.abs(b.vx) > 0.5) return ['run', Math.floor(b.anim)];
+    return ['idle', Math.floor(b.anim * 0.35)];
+  }
+
+  function drawRa(cxp, feetY, o) {
     o = o || {};
-    var w = o.w || 22, h = o.h || 40;
-    // the dark he carries with him
-    if (o.aura !== false) {
-      Gfx.glow(x + w / 2, y + h * 0.45, w * 1.5, '#000000', 0.55 * (o.alpha === undefined ? 1 : o.alpha));
-      Gfx.glow(x + w / 2, y + h * 0.35, w * 1.1, o.eye || PAL.raRed, 0.14 * (o.alpha === undefined ? 1 : o.alpha));
-    }
-    // cape / silhouette
-    if (o.alpha !== undefined) Gfx.ctx.globalAlpha = o.alpha;
-    Gfx.rect(x + 1, y + 8, w - 2, h - 14, o.dark || PAL.ra);
-    if (o.alpha !== undefined) Gfx.ctx.globalAlpha = 1;
-    ent.figure(x, y, {
-      w: w, h: h, face: o.face || 1, phase: o.phase || 0, state: o.state || 'idle',
-      suit: o.hurt ? PAL.white : (o.suit || PAL.ra),
-      trim: o.trim || PAL.raSeam,
-      glow: o.glow || PAL.raRed, eye: o.eye || PAL.raRed,
-      faceless: o.faceless !== false, core: !!o.core, coreLevel: o.coreLevel || 1,
-      alpha: o.alpha
-    });
-    // the seams that make him read as "rendered, not born"
+    var sheet = o.sheet || ent.sheets().raone;
+    var sc = o.scale || RA_SCALE;
     var a = (o.alpha === undefined ? 1 : o.alpha);
-    // rim light down both flanks, so a black figure still has edges
-    Gfx.rectA(x + 2, y + h * 0.22, 1, h * 0.52, o.trim || PAL.raSeam, 0.45 * a);
-    Gfx.rectA(x + w - 3, y + h * 0.22, 1, h * 0.52, o.trim || PAL.raSeam, 0.45 * a);
-    // the scan band where a face would be
-    Gfx.rectA(x + w * 0.28, y + h * 0.10, w * 0.44, 2, o.eye || PAL.raRed, 0.85 * a);
-    Gfx.rectA(x + 3, y + 12, w - 6, 1, o.trim || PAL.raSeam, 0.8 * a);
-    Gfx.rectA(x + 3, y + 18, w - 6, 1, o.trim || PAL.raSeam, 0.5 * a);
-    if (o.eyeGlow !== false) Gfx.glow(x + w / 2, y + 4, 9, o.eye || PAL.raRed, 0.4 * a);
+    var top = feetY - 34 * sc;
+
+    // the dark he carries with him
+    Gfx.glow(cxp, feetY - 20 * sc, 34 * sc, '#000000', 0.5 * a);
+
+    if (o.trail) {
+      for (var k = 1; k <= 3; k++) {
+        global.RA.spr.draw(sheet, o.anim, o.frame, cxp - (o.face || 1) * k * 7, feetY,
+          o.face || 1, { alpha: 0.13 * (4 - k) * a, scale: sc });
+      }
+    }
+    global.RA.spr.draw(sheet, o.anim || 'idle', o.frame || 0, cxp, feetY, o.face || 1,
+      { alpha: o.alpha, scale: sc, flash: o.hurt ? '#ffffff' : null });
+
+    if (o.dim !== true) {
+      Gfx.glow(cxp, top + 6 * sc, 10, o.eye || PAL.raRed, 0.55 * a);   // the scan band
+      Gfx.glow(cxp, top + 16 * sc, 13, o.eye || PAL.raRed, 0.35 * a);  // the core
+    }
   }
 
   /* ================= BASE ================= */
@@ -2026,11 +2747,13 @@ html, body {
         w: 8, h: 5, dmg: 10, owner: 'enemy', color: PAL.raRed, life: 2.0 });
     }
   };
-  RaOne1.prototype.draw = function (cam) {
-    var x = Math.round(this.x - cam.x), y = Math.round(this.y - cam.y);
-    Gfx.rectA(x + 2, y + this.h - 1, this.w - 4, 3, '#000', 0.5);
-    if (this.act === 'charge') Gfx.glow(x + 11, y + 20, 26, PAL.raRed, 0.35);
-    drawRa(x, y, { face: this.face, phase: this.anim, state: this.state, hurt: this.hurtT > 0 });
+  RaOne1.prototype.draw = function (cam, player, world) {
+    var fx = Math.round(this.cx() - cam.x), fy = Math.round(this.y + this.h - cam.y);
+    if (world) ent.contactShadow(this, world, cam);
+    var pose = bossPose(this);
+    if (this.act === 'charge') Gfx.glow(fx, fy - 24, 30, PAL.raRed, 0.4);
+    drawRa(fx, fy, { face: this.face, anim: pose[0], frame: pose[1],
+                     hurt: this.hurtT > 0, trail: this.act === 'charge' });
   };
 
   /* ================= RA.ONE v2.0 — THE SHAPESHIFTER ================= */
@@ -2134,22 +2857,28 @@ html, body {
         w: 8, h: 5, dmg: 12, owner: 'enemy', color: PAL.hart, life: 2.2 });
     }
   };
-  RaOne2.prototype.draw = function (cam) {
-    var x = Math.round(this.x - cam.x), y = Math.round(this.y - cam.y);
-    Gfx.rectA(x + 2, y + this.h - 1, this.w - 4, 2, '#000', 0.4);
+  RaOne2.prototype.draw = function (cam, player, world) {
+    var fx = Math.round(this.cx() - cam.x), fy = Math.round(this.y + this.h - cam.y);
+    if (world) ent.contactShadow(this, world, cam);
+    var pose = bossPose(this);
+
     if (this.morphT > 0) {
-      for (var i = 0; i < 7; i++) {
-        Gfx.rectA(x - 4 + Math.random() * 30, y + Math.random() * this.h, 14, 2, PAL.raSeam, 0.5);
+      // mid-shift: the silhouette tears into scanlines
+      for (var i = 0; i < 8; i++) {
+        Gfx.rectA(fx - 18 + Math.random() * 36, fy - 4 - Math.random() * 40,
+                  16, 2, PAL.raSeam, 0.45);
       }
     }
     if (this.mimic) {
-      // wearing G.One's colours — same silhouette, wrong light
-      drawRa(x, y, { face: this.face, phase: this.anim, state: this.state, hurt: this.hurtT > 0,
-        suit: PAL.bone, trim: PAL.magenta, dark: '#2a2036', eye: PAL.magenta, glow: PAL.magenta,
-        faceless: false, core: true, coreLevel: 0.9 });
-      Gfx.glow(x + 11, y + 20, 24, PAL.magenta, 0.3);
+      // he is wearing your face. Same rig, your colours, wrong light.
+      drawRa(fx, fy, { face: this.face, anim: pose[0], frame: pose[1],
+                       hurt: this.hurtT > 0, sheet: ent.sheets().gone,
+                       scale: 1.15, eye: PAL.magenta, trail: this.act === 'rush' });
+      Gfx.glow(fx, fy - 22, 26, PAL.magenta, 0.35);
+      Gfx.ring(fx, fy - 20, 20 + Math.sin(this.t * 5) * 3, PAL.magenta, 1, 0.4);
     } else {
-      drawRa(x, y, { face: this.face, phase: this.anim, state: this.state, hurt: this.hurtT > 0 });
+      drawRa(fx, fy, { face: this.face, anim: pose[0], frame: pose[1],
+                       hurt: this.hurtT > 0, trail: this.act === 'rush' });
     }
   };
 
@@ -2382,315 +3111,681 @@ html, body {
     return out;
   };
 
-  RaOne3.prototype.draw = function (cam, player) {
-    var x, y, i;
+  RaOne3.prototype.draw = function (cam, player, world) {
+    var i, fx, fy;
     if (this.phase === 3) {
       for (i = 0; i < this.clones.length; i++) {
         var c = this.clones[i];
         if (!c.alive) continue;
-        x = Math.round(c.x - cam.x); y = Math.round(c.y - cam.y);
+        fx = Math.round(c.x + this.w / 2 - cam.x);
+        fy = Math.round(c.y + this.h - cam.y);
         var isReal = (i === this.realIdx);
+
         // THE TELL: every copy stands in the same pool of light.
-        // Only the original puts anything in the way of it.
-        Gfx.glow(x + this.w / 2, y + this.h + 2, 22, PAL.hart, 0.20);
+        // Exactly one of them puts something in the way of it.
+        Gfx.glow(fx, fy + 2, 26, PAL.hart, 0.22);
         if (isReal) {
-          Gfx.rectA(x - 1, y + this.h - 1, this.w + 2, 4, '#000', 0.85);
-          Gfx.rectA(x - 4, y + this.h + 3, this.w + 8, 3, '#000', 0.55);
-          Gfx.rectA(x - 7, y + this.h + 6, this.w + 14, 2, '#000', 0.3);
+          Gfx.ctx.globalAlpha = 0.85;
+          Gfx.ctx.fillStyle = '#000';
+          Gfx.ctx.beginPath();
+          Gfx.ctx.ellipse(fx, fy + 1, 15, 4, 0, 0, Math.PI * 2);
+          Gfx.ctx.fill();
+          Gfx.ctx.globalAlpha = 0.4;
+          Gfx.ctx.beginPath();
+          Gfx.ctx.ellipse(fx + 3, fy + 5, 22, 3, 0, 0, Math.PI * 2);
+          Gfx.ctx.fill();
+          Gfx.ctx.globalAlpha = 1;
         }
-        var fl = c.fade > 0 ? 0.4 : 1;
-        drawRa(x, y, {
-          face: c.face, phase: this.anim + i, state: 'idle',
-          hurt: isReal && this.hurtT > 0, alpha: fl,
-          eyeGlow: true
+        drawRa(fx, fy, {
+          face: c.face, anim: 'idle', frame: Math.floor(this.anim * 0.35) + i,
+          hurt: isReal && this.hurtT > 0,
+          alpha: c.fade > 0 ? 0.45 : 1
         });
       }
       return;
     }
-    x = Math.round(this.x - cam.x); y = Math.round(this.y - cam.y);
-    Gfx.rectA(x + 2, y + this.h - 1, this.w - 4, 2, '#000', 0.4);
-    if (this.phase === 1) Gfx.ring(x + 11, y + 20, 26 + Math.sin(this.t * 4) * 3, PAL.steelLite, 1, 0.35);
-    drawRa(x, y, { face: this.face, phase: this.anim, state: this.state, hurt: this.hurtT > 0 });
 
-    // the laser sight of a gun that only needs to work once
+    fx = Math.round(this.cx() - cam.x);
+    fy = Math.round(this.y + this.h - cam.y);
+    if (world) ent.contactShadow(this, world, cam);
+    var pose = bossPose(this);
+
+    if (this.phase === 1) {
+      // the guard he has not lowered yet
+      var r = 30 + Math.sin(this.t * 4) * 3;
+      Gfx.ring(fx, fy - 22, r, PAL.steelLite, 1, 0.35);
+      Gfx.ring(fx, fy - 22, r - 5, PAL.steelLite, 1, 0.15);
+    }
+    drawRa(fx, fy, { face: this.face, anim: pose[0], frame: pose[1],
+                     hurt: this.hurtT > 0, trail: this.act === 'rush' });
+
+    // the laser sight of a gun that only has to work once
     if (this.phase === 2 && this.aiming && player && !player.dead) {
       var px = player.cx() - cam.x, py = player.cy() - cam.y;
       var t = 1 - C.clamp(this.aimT / 2.6, 0, 1);
-      Gfx.ctx.globalAlpha = 0.35 + t * 0.5;
-      Gfx.line(x + 11, y + 16, px, py, PAL.raRed, 1);
+      var gx = fx + this.face * 14, gy = fy - 26;
+      Gfx.ctx.globalAlpha = 0.3 + t * 0.55;
+      Gfx.line(gx, gy, px, py, PAL.raRed, 1);
       Gfx.ctx.globalAlpha = 1;
-      Gfx.ring(px, py, 12 - t * 8, PAL.raRed, 1, 0.9);
+      Gfx.ring(px, py, 14 - t * 9, PAL.raRed, 1, 0.9);
       Gfx.ring(px, py, 3, PAL.raRed, 1, 0.9);
-      Gfx.glow(x + 11, y + 16, 10 + t * 10, PAL.raRed, 0.4 + t * 0.4);
+      Gfx.line(px - 8, py, px - 3, py, PAL.raRed, 1);
+      Gfx.line(px + 3, py, px + 8, py, PAL.raRed, 1);
+      Gfx.line(px, py - 8, px, py - 3, PAL.raRed, 1);
+      Gfx.line(px, py + 3, px, py + 8, PAL.raRed, 1);
+      Gfx.glow(gx, gy, 10 + t * 12, PAL.raRed, 0.4 + t * 0.5);
     }
   };
 
   global.RA.bosses = {
+    drawRa: drawRa, bossPose: bossPose, RA_SCALE: RA_SCALE,
     make: function (kind, x, y, level, game) {
       if (kind === 'ra1') return new RaOne1(x, y, level, game);
       if (kind === 'ra2') return new RaOne2(x, y, level, game);
       return new RaOne3(x, y, level, game);
-    },
-    drawRa: drawRa
+    }
   };
 })(window);
 
 /* ===== src/game/hud.js ===== */
 /* =============================================================
-   game/hud.js — parallax backdrops, tile painting, HUD
+   game/hud.js — backdrops, baked tile art, HUD
+
+   Backdrops are five parallax layers each, drawn from deterministic
+   noise so nothing crawls between frames. Tiles are baked once into
+   offscreen canvases with texture, wear and an emissive top edge,
+   then blitted — cheaper than the rectangles they replace and far
+   less flat.
    ============================================================= */
 (function (global) {
   'use strict';
-  var C = global.RA.core, Gfx = C.Gfx, PAL = C.PAL, T = C.TILE;
+  var RA = global.RA, C = RA.core, Gfx = C.Gfx, PAL = C.PAL, T = C.TILE;
   var VW = C.VIEW_W, VH = C.VIEW_H;
 
-  /* deterministic pseudo-random so the skyline doesn't crawl */
+  /* deterministic pseudo-random: the skyline is the same every frame */
   function h1(n) { var x = Math.sin(n * 127.1) * 43758.5453; return x - Math.floor(x); }
+  function h2(a, b) { return h1(a * 31.7 + b * 91.3); }
 
-  var Back = {
-    london: function (cam, t) {
-      Gfx.rect(0, 0, VW, VH, '#070a14');
-      // cold sky wash
-      var g = Gfx.ctx.createLinearGradient(0, 0, 0, VH);
-      g.addColorStop(0, '#0b1226'); g.addColorStop(0.6, '#0a0f1c'); g.addColorStop(1, '#05060b');
-      Gfx.ctx.fillStyle = g; Gfx.ctx.fillRect(0, 0, VW, VH);
+  function cv(w, h) {
+    var c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    var x = c.getContext('2d');
+    x.imageSmoothingEnabled = false;
+    return c;
+  }
 
-      // far skyline
-      var ox = -cam.x * 0.12;
-      for (var i = 0; i < 40; i++) {
-        var bx = ((i * 70 + ox) % (VW + 140)) - 70;
-        var bw = 32 + h1(i) * 42, bh = 60 + h1(i + 9) * 120;
-        Gfx.rect(bx, VH - 70 - bh, bw, bh + 70, '#0d1424');
-        for (var wy = 0; wy < bh; wy += 16) {
-          for (var wx = 4; wx < bw - 5; wx += 12) {
-            if (h1(i * 31 + wy + wx) > 0.86) {
-              Gfx.rectA(bx + wx, VH - 70 - bh + wy + 5, 2, 3, '#22314f', 0.55);
+  /* ================= BAKED TILES ================= */
+  var TILES = {};
+
+  function bakeStyle(style, spec) {
+    var body = cv(T, T), b = body.getContext('2d');
+    b.fillStyle = spec.base; b.fillRect(0, 0, T, T);
+    // panel inset
+    b.fillStyle = spec.face; b.fillRect(1, 1, T - 2, T - 2);
+    // seams
+    b.fillStyle = spec.seam;
+    b.fillRect(0, 0, T, 1); b.fillRect(0, T - 1, T, 1);
+    b.fillRect(0, 0, 1, T); b.fillRect(T - 1, 0, 1, T);
+    spec.detail(b);
+    // grime, fixed pattern
+    for (var i = 0; i < 26; i++) {
+      var gx = Math.floor(h2(i, 1) * T), gy = Math.floor(h2(i, 2) * T);
+      b.fillStyle = h2(i, 3) > 0.5 ? spec.grimeLo : spec.grimeHi;
+      b.globalAlpha = 0.20 + h2(i, 4) * 0.28;
+      b.fillRect(gx, gy, 1, 1);
+      b.globalAlpha = 1;
+    }
+
+    // lit top edge, with the dark band that sells the thickness
+    var top = cv(T, 6), tc = top.getContext('2d');
+    tc.fillStyle = spec.lip; tc.fillRect(0, 0, T, 2);
+    tc.fillStyle = spec.edge; tc.fillRect(0, 0, T, 1);
+    var grad = tc.createLinearGradient(0, 2, 0, 6);
+    grad.addColorStop(0, 'rgba(0,0,0,0.5)');
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    tc.fillStyle = grad; tc.fillRect(0, 2, T, 4);
+
+    // one-way platform
+    var plat = cv(T, 6), pc = plat.getContext('2d');
+    pc.fillStyle = spec.platBody; pc.fillRect(0, 1, T, 4);
+    pc.fillStyle = spec.edge; pc.fillRect(0, 0, T, 1);
+    pc.fillStyle = 'rgba(0,0,0,0.55)'; pc.fillRect(1, 5, T - 2, 1);
+    pc.fillStyle = spec.seam;
+    pc.fillRect(2, 2, 1, 2); pc.fillRect(T - 3, 2, 1, 2);
+
+    TILES[style] = { body: body, top: top, plat: plat, edge: spec.edge };
+  }
+
+  function bakeTiles() {
+    if (TILES.london) return;
+    bakeStyle('london', {
+      base: '#0e1626', face: '#1a2740', seam: '#0a1120',
+      grimeLo: '#0b1320', grimeHi: '#33507d',
+      lip: '#3f5f8f', edge: '#7fd2ff', platBody: '#22314c',
+      detail: function (b) {
+        b.fillStyle = '#23345a';
+        b.fillRect(3, 4, T - 6, 1);
+        b.fillRect(3, 10, T - 6, 1);
+        b.fillStyle = '#0d1524';
+        b.fillRect(3, 5, T - 6, 1);
+        b.fillStyle = '#3a5a86';
+        b.fillRect(3, 3, 2, 1); b.fillRect(T - 5, 3, 2, 1);
+        b.fillRect(3, 9, 2, 1); b.fillRect(T - 5, 9, 2, 1);
+      }
+    });
+    bakeStyle('mumbai', {
+      base: '#2a1c2e', face: '#3a2838', seam: '#1a1020',
+      grimeLo: '#20141f', grimeHi: '#6b4a3a',
+      lip: '#7a5540', edge: '#ffb400', platBody: '#402c3c',
+      detail: function (b) {
+        // riveted coach ribs
+        b.fillStyle = '#4a3548';
+        b.fillRect(0, 4, T, 2); b.fillRect(0, 10, T, 2);
+        b.fillStyle = '#231624';
+        b.fillRect(0, 6, T, 1); b.fillRect(0, 12, T, 1);
+        b.fillStyle = '#8a6a52';
+        for (var r = 2; r < T; r += 5) { b.fillRect(r, 2, 1, 1); b.fillRect(r, 8, 1, 1); }
+      }
+    });
+    bakeStyle('grid', {
+      base: '#07182c', face: '#0c2440', seam: '#04101f',
+      grimeLo: '#061626', grimeHi: '#1d5a8c',
+      lip: '#1b5c8c', edge: '#38d8ff', platBody: '#0f2c4c',
+      detail: function (b) {
+        // circuit traces
+        b.fillStyle = '#134470';
+        b.fillRect(2, 3, 9, 1); b.fillRect(10, 3, 1, 6);
+        b.fillRect(5, 12, 8, 1); b.fillRect(5, 8, 1, 4);
+        b.fillStyle = '#2b8fc4';
+        b.fillRect(10, 8, 2, 2); b.fillRect(4, 11, 2, 2);
+      }
+    });
+  }
+
+  /* ================= BACKDROPS ================= */
+  /* every Back(cam, t, game) draws five layers back-to-front */
+
+  function skyline(cam, t, o) {
+    var ox = -cam.x * o.par, i;
+    for (i = 0; i < o.count; i++) {
+      var seed = i + o.seed;
+      var span = o.span;
+      var bx = (((i * span + ox) % (VW + span * 2)) + VW + span * 2) % (VW + span * 2) - span;
+      var bw = o.wMin + h1(seed) * o.wVar;
+      var bh = o.hMin + h1(seed + 9) * o.hVar;
+      var by = o.baseY - bh;
+      Gfx.rect(bx, by, bw, bh + 80, o.color);
+      if (o.crown) Gfx.rectA(bx, by, bw, 1, o.crown, 0.5);
+      // windows
+      if (o.win) {
+        for (var wy = 6; wy < bh - 4; wy += o.winGapY) {
+          for (var wx = 4; wx < bw - 5; wx += o.winGapX) {
+            var r = h2(seed * 13 + wy, wx);
+            if (r > o.winDens) {
+              Gfx.rectA(bx + wx, by + wy, o.winW, o.winH, r > 0.94 ? o.winHot : o.win,
+                        0.35 + r * 0.4);
             }
           }
         }
       }
-      // near towers
-      ox = -cam.x * 0.32;
-      for (i = 0; i < 26; i++) {
-        var nx = ((i * 110 + ox) % (VW + 220)) - 110;
-        var nw = 56 + h1(i + 3) * 40, nh = 110 + h1(i + 7) * 130;
-        Gfx.rect(nx, VH - 40 - nh, nw, nh + 40, '#0a0f1c');
-        Gfx.rect(nx, VH - 40 - nh, nw, 2, '#16233d');
-        for (var k = 0; k < nh; k += 22) {
-          if (h1(i * 17 + k) > 0.78) Gfx.rectA(nx + 7, VH - 40 - nh + k + 6, nw - 14, 2, '#16243d', 0.7);
+      // aircraft warning light
+      if (o.blink && h1(seed + 3) > 0.72) {
+        var on = (Math.floor(t * 1.1 + seed) % 3) === 0;
+        if (on) {
+          Gfx.rectA(bx + bw / 2, by - 2, 2, 2, PAL.raRed, 0.9);
+          Gfx.glow(bx + bw / 2 + 1, by - 1, 7, PAL.raRed, 0.4);
         }
       }
-      // rain
-      for (i = 0; i < 60; i++) {
-        var rx = (h1(i) * VW + t * (60 + h1(i + 1) * 90)) % VW;
-        var ry = (h1(i + 5) * VH + t * (260 + h1(i + 2) * 200)) % VH;
-        Gfx.rectA(rx, ry, 1, 6, '#3a5480', 0.35);
-      }
-    },
+    }
+  }
 
-    mumbai: function (cam, t) {
+  var Back = {
+    /* ---------- LONDON: rain, glass, and the tower he came out of ---------- */
+    london: function (cam, t, game) {
       var g = Gfx.ctx.createLinearGradient(0, 0, 0, VH);
-      g.addColorStop(0, '#1a0f22'); g.addColorStop(0.45, '#241228'); g.addColorStop(1, '#0a0710');
+      g.addColorStop(0, '#070c1a');
+      g.addColorStop(0.55, '#0b1424');
+      g.addColorStop(0.86, '#141d2e');
+      g.addColorStop(1, '#1b2233');
       Gfx.ctx.fillStyle = g; Gfx.ctx.fillRect(0, 0, VW, VH);
+      Gfx.glow(VW * 0.25, VH * 0.78, 300, '#2a3c5e', 0.16);
 
-      // haze + city glow
-      Gfx.glow(VW * 0.7, VH * 0.35, 220, '#ff7a1a', 0.10);
-      var ox = -cam.x * 0.15, i;
+      skyline(cam, t, { par: 0.06, count: 30, span: 58, seed: 100, baseY: VH - 54,
+        wMin: 20, wVar: 26, hMin: 40, hVar: 96, color: '#0a111f',
+        win: '#2b4269', winHot: '#5d86bd', winGapX: 7, winGapY: 11,
+        winW: 2, winH: 2, winDens: 0.80, blink: true });
+
+      skyline(cam, t, { par: 0.17, count: 20, span: 96, seed: 200, baseY: VH - 40,
+        wMin: 40, wVar: 40, hMin: 70, hVar: 130, color: '#0d1a2c', crown: '#27406a',
+        win: '#325a8c', winHot: '#7fb0e0', winGapX: 9, winGapY: 13,
+        winW: 3, winH: 3, winDens: 0.76, blink: true });
+
+      /* the Barron Industries slab: the landmark you pass all level,
+         and the building the villain walked out of */
+      var bx = 240 - cam.x * 0.3;
+      var bw = 128, bh = 262, by = VH - 34 - bh;
+      Gfx.rect(bx - 6, by + 26, bw + 12, bh, '#0a1522');          // podium mass
+      Gfx.rect(bx, by, bw, bh + 40, '#0e1c2e');                   // tower
+      Gfx.rectA(bx, by, bw, 2, '#38618f', 0.9);
+      Gfx.rectA(bx, by, 2, bh, '#16283f', 0.9);
+      Gfx.rectA(bx + bw - 2, by, 2, bh, '#081220', 0.9);
+      // spine of light up the centre
+      Gfx.rectA(bx + bw / 2 - 2, by + 6, 4, bh - 46, '#123a5e', 0.9);
+      Gfx.rectA(bx + bw / 2 - 1, by + 6, 2, bh - 46, '#2f7fb5', 0.5);
+      // window bands
+      for (var fy = by + 16; fy < by + bh - 40; fy += 15) {
+        for (var wx = 8; wx < bw - 12; wx += 15) {
+          var wr = h2(fy, wx);
+          if (wr < 0.30) continue;
+          Gfx.rectA(bx + wx, fy, 11, 7, wr > 0.92 ? '#7fb6e8' : '#20406b',
+                    0.35 + wr * 0.45);
+        }
+      }
+      // crown mast with its warning light
+      Gfx.rect(bx + bw / 2 - 1, by - 26, 3, 26, '#0c1728');
+      if ((Math.floor(t * 1.2) % 3) === 0) {
+        Gfx.rectA(bx + bw / 2 - 1, by - 28, 3, 3, PAL.raRed, 0.95);
+        Gfx.glow(bx + bw / 2, by - 27, 10, PAL.raRed, 0.5);
+      }
+      // the sign
+      var pulse = 0.55 + 0.45 * Math.sin(t * 1.4);
+      Gfx.rectA(bx + 10, by + bh - 34, bw - 20, 15, '#040a12', 0.95);
+      Gfx.text('BARRON', bx + bw / 2, by + bh - 31,
+        { size: 11, align: 'center', color: '#7fd2ff', alpha: 0.5 + pulse * 0.4 });
+      Gfx.glow(bx + bw / 2, by + bh - 26, 30, '#38d8ff', 0.09 + pulse * 0.11);
+
+      /* interior mullions in the near ground */
+      var mx = -cam.x * 0.55;
+      for (var i = 0; i < 26; i++) {
+        var px = (((i * 118 + mx) % (VW + 236)) + VW + 236) % (VW + 236) - 118;
+        Gfx.rectA(px, 0, 7, VH, '#060a14', 0.85);
+        Gfx.rectA(px + 7, 0, 1, VH, '#16263f', 0.6);
+        Gfx.rectA(px + 2, VH * 0.2, 3, VH * 0.55, '#0f2a45', 0.5);
+      }
+
+      /* rain, two speeds, plus the occasional distant strike */
       for (i = 0; i < 46; i++) {
-        var bx = ((i * 62 + ox) % (VW + 124)) - 62;
-        var bh = 40 + h1(i + 21) * 90;
-        Gfx.rect(bx, VH - 60 - bh, 30 + h1(i) * 28, bh + 60, '#150c1c');
-        if (h1(i * 3) > 0.5) Gfx.rectA(bx + 4, VH - 60 - bh + 8, 4, 4, PAL.amber, 0.7);
-        if (h1(i * 5) > 0.7) Gfx.rectA(bx + 14, VH - 60 - bh + 20, 4, 4, PAL.saffron, 0.6);
+        var rx = (h1(i) * VW + t * (140 + h1(i + 1) * 90)) % VW;
+        var ry = (h1(i + 5) * VH + t * (420 + h1(i + 2) * 260)) % VH;
+        Gfx.rectA(rx, ry, 1, 9, '#4a6d9e', 0.30);
       }
-      // catenary poles whipping past
-      ox = -cam.x * 0.75;
-      for (i = 0; i < 30; i++) {
-        var px = ((i * 96 + ox) % (VW + 192)) - 96;
-        Gfx.rect(px, VH - 250, 4, 250, '#0f0a14');
-        Gfx.rect(px - 16, VH - 250, 36, 3, '#0f0a14');
-        Gfx.rectA(px - 16, VH - 246, 36, 1, PAL.amber, 0.25);
-      }
-      // speed lines
       for (i = 0; i < 26; i++) {
-        var sy = (h1(i + 40) * VH);
-        var sx = (VW - ((t * 900 + h1(i) * 1400) % (VW + 300)));
-        Gfx.rectA(sx, sy, 40 + h1(i) * 60, 1, '#ffb400', 0.16);
+        var rx2 = (h1(i + 30) * VW + t * 70) % VW;
+        var ry2 = (h1(i + 40) * VH + t * 200) % VH;
+        Gfx.rectA(rx2, ry2, 1, 5, '#2f4a6d', 0.22);
+      }
+      var strike = Math.sin(t * 0.31) > 0.9985;
+      if (strike) Gfx.rectA(0, 0, VW, VH, '#8fb6ff', 0.10);
+
+      // floor fog
+      var fg = Gfx.ctx.createLinearGradient(0, VH - 70, 0, VH);
+      fg.addColorStop(0, 'rgba(30,48,78,0)');
+      fg.addColorStop(1, 'rgba(38,60,96,0.30)');
+      Gfx.ctx.fillStyle = fg; Gfx.ctx.fillRect(0, VH - 70, VW, 70);
+    },
+
+    /* ---------- MUMBAI: the city, and CST getting closer ---------- */
+    mumbai: function (cam, t, game) {
+      var g = Gfx.ctx.createLinearGradient(0, 0, 0, VH);
+      g.addColorStop(0, '#160a1e');
+      g.addColorStop(0.4, '#26102a');
+      g.addColorStop(0.78, '#3a1a2a');
+      g.addColorStop(1, '#120a14');
+      Gfx.ctx.fillStyle = g; Gfx.ctx.fillRect(0, 0, VW, VH);
+      Gfx.glow(VW * 0.62, VH * 0.42, 260, '#ff7a1a', 0.13);
+      Gfx.glow(VW * 0.15, VH * 0.55, 180, '#ff3fd0', 0.05);
+
+      skyline(cam, t, { par: 0.07, count: 34, span: 52, seed: 400, baseY: VH - 62,
+        wMin: 18, wVar: 24, hMin: 30, hVar: 80, color: '#180d1c',
+        win: '#6b4426', winHot: '#ffb400', winGapX: 6, winGapY: 9,
+        winW: 2, winH: 2, winDens: 0.86, blink: false });
+
+      /* CST grows out of the haze as the clock runs down — the film's
+         whole second half is a countdown to this building */
+      if (game && game.world && game.world.level.timer) {
+        var prog = 1 - C.clamp(game.timeLeft / game.world.level.timer, 0, 1);
+        var near = C.clamp((game.player ? game.player.x / game.world.pxW : 0), 0, 1);
+        var k = Math.max(prog, near);
+        var sc = 0.55 + k * 1.7;
+        var cx = VW * 0.66, base = VH - 48, w = 96 * sc, h = 104 * sc;
+        var al = 0.55 + k * 0.45;
+        Gfx.ctx.globalAlpha = al;
+
+        // main block, warmer and lighter than the skyline behind it
+        Gfx.rect(cx - w / 2, base - h, w, h + 48, '#3b2440');
+        Gfx.rectA(cx - w / 2, base - h, w, 2, '#5d3a5e', 0.9);
+        // wings
+        Gfx.rect(cx - w * 0.66, base - h * 0.60, w * 0.30, h * 0.60 + 48, '#33203a');
+        Gfx.rect(cx + w * 0.36, base - h * 0.60, w * 0.30, h * 0.60 + 48, '#33203a');
+        // the dome
+        Gfx.ctx.fillStyle = '#4a2c4e';
+        Gfx.ctx.beginPath();
+        Gfx.ctx.arc(cx, base - h + 2, w * 0.21, Math.PI, 0);
+        Gfx.ctx.fill();
+        Gfx.ctx.fillStyle = '#5d3a5e';
+        Gfx.ctx.beginPath();
+        Gfx.ctx.arc(cx, base - h + 2, w * 0.21, Math.PI, Math.PI * 1.4);
+        Gfx.ctx.fill();
+        Gfx.rect(cx - 2 * sc, base - h - w * 0.32, 4 * sc, w * 0.13, '#4a2c4e');
+        // turrets along the roofline
+        for (var s2 = -2; s2 <= 2; s2++) {
+          if (!s2) continue;
+          Gfx.rect(cx + s2 * w * 0.26 - 2 * sc, base - h * 0.94, 5 * sc, h * 0.20, '#43284a');
+          Gfx.ctx.beginPath();
+          Gfx.ctx.fillStyle = '#4a2c4e';
+          Gfx.ctx.moveTo(cx + s2 * w * 0.26 - 4 * sc, base - h * 0.94);
+          Gfx.ctx.lineTo(cx + s2 * w * 0.26 + 0.5 * sc, base - h * 1.04);
+          Gfx.ctx.lineTo(cx + s2 * w * 0.26 + 5 * sc, base - h * 0.94);
+          Gfx.ctx.fill();
+        }
+        // the clock, lit
+        var clk = base - h * 0.80;
+        Gfx.circle(cx, clk, 5.5 * sc, '#2a1a2e');
+        Gfx.circle(cx, clk, 4.4 * sc, '#ffd27a');
+        Gfx.ctx.globalAlpha = al;
+        Gfx.line(cx, clk, cx + Math.cos(t * 0.4) * 3 * sc, clk + Math.sin(t * 0.4) * 3 * sc, '#3a2338', 1);
+        Gfx.glow(cx, clk, 16 * sc, '#ffb400', 0.22 * al);
+        // arched windows
+        for (var ry = 0; ry < 5; ry++) {
+          for (var rx = -4; rx <= 4; rx++) {
+            if (h2(ry * 3, rx + 7) < 0.34) continue;
+            Gfx.rectA(cx + rx * w * 0.13 - 1.6 * sc, base - h * 0.62 + ry * h * 0.13,
+                      3.2 * sc, 5.5 * sc, ry === 0 ? '#ffd27a' : '#ffab3c', 0.55);
+          }
+        }
+        Gfx.ctx.globalAlpha = 1;
+        Gfx.glow(cx, base - h * 0.45, 76 * sc, '#ff9a3c', 0.09 + k * 0.13);
+        if (k > 0.55) {
+          Gfx.text('CHHATRAPATI SHIVAJI TERMINUS', cx, base + 16,
+            { size: 7, align: 'center', color: '#c98a5a', alpha: (k - 0.55) * 1.6 });
+        }
+      }
+
+      /* catenary poles and wires */
+      var ox = -cam.x * 0.78, i;
+      for (i = 0; i < 24; i++) {
+        var px = (((i * 104 + ox) % (VW + 208)) + VW + 208) % (VW + 208) - 104;
+        Gfx.rect(px, VH - 300, 5, 300, '#100a16');
+        Gfx.rect(px - 20, VH - 300, 44, 4, '#100a16');
+        Gfx.rectA(px - 20, VH - 296, 44, 1, PAL.amber, 0.22);
+        Gfx.rectA(px + 2, VH - 258, 1, 40, '#1d1224', 0.9);
+      }
+      Gfx.rectA(0, VH - 292, VW, 1, '#241a2c', 0.75);
+      Gfx.rectA(0, VH - 284, VW, 1, '#1d1424', 0.6);
+
+      /* speed lines and rail sparks */
+      for (i = 0; i < 30; i++) {
+        var sy = h1(i + 40) * VH;
+        var sx = VW - ((t * 1100 + h1(i) * 1600) % (VW + 320));
+        Gfx.rectA(sx, sy, 34 + h1(i) * 70, 1, '#ffb400', 0.13);
+      }
+      for (i = 0; i < 8; i++) {
+        var kx = (t * 700 + i * 190) % (VW + 200) - 100;
+        if (h1(Math.floor(t * 2) + i) > 0.7) {
+          Gfx.rectA(VW - kx, VH - 40 + h1(i) * 20, 3, 1, '#ffd27a', 0.5);
+        }
       }
     },
 
-    grid: function (cam, t) {
-      Gfx.rect(0, 0, VW, VH, '#03040a');
-      var cxp = VW / 2, hy = VH * 0.42, i;
-      // horizon glow
-      Gfx.glow(cxp, hy, 260, '#123a6b', 0.35);
-      Gfx.rectA(0, hy, VW, 1, PAL.hart, 0.5);
-      // perspective floor
-      for (i = -16; i <= 16; i++) {
-        var fx = cxp + i * 46;
-        Gfx.ctx.globalAlpha = 0.22;
-        Gfx.line(cxp + i * 8, hy, fx * 1.6 - cxp * 0.6 - cam.x * 0.2, VH, '#1c4f80', 1);
+    /* ---------- THE GRID: ten heads in the dark ---------- */
+    grid: function (cam, t, game) {
+      Gfx.rect(0, 0, VW, VH, '#02030a');
+      var hy = VH * 0.40, i;
+
+      /* RAVAN. Shah Rukh Khan described Ra.One as the new-age version of
+         Raavan — "a mixture of ten different evil characters". Ten heads
+         watch the third level. Ten copies happen in it. */
+      var rx = VW / 2 - cam.x * 0.05, ry = hy - 46;
+      Gfx.ctx.globalAlpha = 0.5;
+      Gfx.ctx.fillStyle = '#080d18';
+      Gfx.ctx.beginPath();
+      Gfx.ctx.ellipse(rx, ry + 40, 190, 54, 0, 0, Math.PI * 2);
+      Gfx.ctx.fill();
+      for (i = 0; i < 10; i++) {
+        var a = (i - 4.5) * 0.26;
+        var hx = rx + Math.sin(a) * 150;
+        var hh = ry + 16 - Math.cos(a) * 34;
+        Gfx.ctx.fillStyle = '#0b1220';
+        Gfx.ctx.beginPath();
+        Gfx.ctx.ellipse(hx, hh, 15, 19, a * 0.7, 0, Math.PI * 2);
+        Gfx.ctx.fill();
+        // crown spike
+        Gfx.ctx.fillStyle = '#0d1626';
+        Gfx.ctx.beginPath();
+        Gfx.ctx.moveTo(hx - 5, hh - 15);
+        Gfx.ctx.lineTo(hx, hh - 30);
+        Gfx.ctx.lineTo(hx + 5, hh - 15);
+        Gfx.ctx.fill();
+      }
+      Gfx.ctx.globalAlpha = 1;
+      for (i = 0; i < 10; i++) {
+        var a2 = (i - 4.5) * 0.26;
+        var ex = rx + Math.sin(a2) * 150, ey = ry + 18 - Math.cos(a2) * 34;
+        var blink = Math.sin(t * 0.7 + i * 1.9) > 0.86 ? 0.05 : 1;
+        Gfx.rectA(ex - 6, ey, 4, 2, PAL.raRed, 0.75 * blink);
+        Gfx.rectA(ex + 2, ey, 4, 2, PAL.raRed, 0.75 * blink);
+        Gfx.glow(ex, ey + 1, 11, PAL.raRed, 0.22 * blink);
+      }
+
+      /* horizon */
+      Gfx.glow(VW / 2, hy, 300, '#0e3f6e', 0.4);
+      Gfx.rectA(0, hy, VW, 1, PAL.hart, 0.6);
+      Gfx.glow(VW / 2, hy, 90, PAL.hart, 0.18);
+
+      /* receding floor */
+      var vpx = VW / 2 - cam.x * 0.12;
+      for (i = -20; i <= 20; i++) {
+        Gfx.ctx.globalAlpha = 0.20;
+        Gfx.line(vpx + i * 7, hy, vpx + i * 78, VH, '#17527f', 1);
         Gfx.ctx.globalAlpha = 1;
       }
-      for (i = 0; i < 14; i++) {
-        var p = ((i / 14) + (t * 0.18) % (1 / 14));
-        var yy = hy + Math.pow(p, 2.4) * (VH - hy);
-        Gfx.rectA(0, yy, VW, 1, '#1c4f80', 0.30);
+      for (i = 0; i < 16; i++) {
+        var p = (i / 16 + (t * 0.14) % (1 / 16));
+        var yy = hy + Math.pow(p, 2.5) * (VH - hy);
+        Gfx.rectA(0, yy, VW, 1, '#17527f', 0.26);
       }
-      // vertical data columns
-      for (i = 0; i < 22; i++) {
-        var vx = ((i * 71 - cam.x * 0.35) % (VW + 71) + VW + 71) % (VW + 71) - 35;
-        var seed = Math.floor(i * 7);
-        Gfx.rectA(vx, 0, 1, hy, '#0d2b4d', 0.7);
-        for (var k = 0; k < 6; k++) {
-          var gy = ((h1(seed + k) * hy) + t * (18 + h1(seed) * 40)) % hy;
-          Gfx.rectA(vx - 1, gy, 3, 6, PAL.hart, 0.35);
+      // a scan pulse running out to the horizon
+      var pulseP = (t * 0.35) % 1;
+      var py = hy + Math.pow(pulseP, 2.5) * (VH - hy);
+      Gfx.rectA(0, py, VW, 1, PAL.hart, 0.35 * (1 - pulseP));
+
+      /* data columns */
+      for (i = 0; i < 26; i++) {
+        var vx = (((i * 63 - cam.x * 0.3) % (VW + 63)) + VW + 63) % (VW + 63) - 31;
+        Gfx.rectA(vx, 0, 1, hy, '#0a2745', 0.7);
+        for (var k = 0; k < 5; k++) {
+          var gy = ((h1(i * 7 + k) * hy) + t * (16 + h1(i) * 44)) % hy;
+          Gfx.rectA(vx - 1, gy, 3, 5, PAL.hart, 0.30);
         }
       }
     }
   };
 
-  /* a scrim between backdrop and playfield: the city must never
-     be mistaken for something you can stand on */
-  function scrim(style) {
-    Gfx.rectA(0, 0, VW, VH, style === 'mumbai' ? '#0a0410' : '#03050c', 0.42);
+  /* Ra.One in the parallax, standing on something in the middle distance,
+     turned towards you. He is in the film for about eleven minutes; he is
+     in this game constantly. */
+  function drawStalkers(world, cam, t) {
+    var list = world.level.stalkers;
+    if (!list || !list.length) return;
+    for (var i = 0; i < list.length; i++) {
+      var st = list[i];
+      var sx = st[0] * T - cam.x * (st[2] || 0.55);
+      if (sx < -60 || sx > VW + 60) continue;
+      var sy = st[1] * T - cam.y * 0.2;
+      var face = (cam.x + VW / 2) > (st[0] * T) ? -1 : 1;
+      var breathe = Math.sin(t * 1.1 + i) * 0.5;
+      RA.spr.draw(RA.spr.build().ghost, 'idle', Math.floor(t * 0.8) + i,
+                  sx, sy + breathe, face, { alpha: 0.85, scale: 1.15 });
+      // two red pinpricks that find you across a rooftop
+      Gfx.glow(sx, sy - 34, 9, PAL.raRed, 0.35 + 0.15 * Math.sin(t * 2 + i));
+      Gfx.rectA(sx - 4, sy - 35, 3, 1, PAL.raRed, 0.8);
+      Gfx.rectA(sx + 1, sy - 35, 3, 1, PAL.raRed, 0.8);
+    }
   }
 
-  /* ---------- tiles ---------- */
+  /* the scrim keeps the city from ever reading as a platform */
+  function scrim(style) {
+    Gfx.rectA(0, 0, VW, VH, style === 'mumbai' ? '#0a0410' : '#02040c', 0.38);
+  }
+
+  /* ================= TILES ================= */
   function drawTiles(world, cam, t) {
+    bakeTiles();
+    var set = TILES[world.level.bg] || TILES.london;
     var x0 = Math.max(0, Math.floor(cam.x / T) - 1);
     var x1 = Math.min(world.w - 1, Math.floor((cam.x + VW) / T) + 1);
     var y0 = Math.max(0, Math.floor(cam.y / T) - 1);
     var y1 = Math.min(world.h - 1, Math.floor((cam.y + VH) / T) + 1);
-    var style = world.level.bg;
+    var ctx = Gfx.ctx;
 
     for (var y = y0; y <= y1; y++) {
       for (var x = x0; x <= x1; x++) {
         var ch = world.tiles[y][x];
         if (ch === '.') continue;
         var px = Math.round(x * T - cam.x), py = Math.round(y * T - cam.y);
+
         if (ch === '#') {
-          var open = !world.isSolid(x, y - 1);
-          if (style === 'mumbai') {
-            Gfx.rect(px, py, T, T, '#2a2033');
-            Gfx.rect(px + 1, py + 1, T - 2, T - 2, '#33263e');
-            if (open) { Gfx.rect(px, py, T, 2, '#3a2c46'); Gfx.rect(px, py, T, 1, PAL.amber); }
-            if ((x + y) % 4 === 0) Gfx.rectA(px + 3, py + 5, T - 6, 1, '#4a3a56', 0.6);
-          } else if (style === 'grid') {
-            Gfx.rect(px, py, T, T, '#0e2440');
-            Gfx.rect(px + 1, py + 1, T - 2, T - 2, '#123055');
-            if (open) Gfx.rect(px, py, T, 1, PAL.hart);
-            Gfx.rectA(px, py, 1, T, '#123a6b', 0.8);
-          } else {
-            Gfx.rect(px, py, T, T, '#182640');
-            Gfx.rect(px + 1, py + 1, T - 2, T - 2, '#1f3352');
-            Gfx.rectA(px, py, 1, T, '#0c1424', 0.9);
-            if (open) { Gfx.rect(px, py, T, 2, '#3d5a86'); Gfx.rect(px, py, T, 1, PAL.hart); }
-            if ((x * 7 + y * 3) % 9 === 0) Gfx.rectA(px + 4, py + 6, 3, 3, PAL.hart, 0.4);
+          ctx.drawImage(set.body, px, py);
+          if (!world.isSolid(x, y - 1)) {
+            ctx.drawImage(set.top, px, py);
+            if ((x * 5 + y * 3) % 11 === 0) Gfx.glow(px + T / 2, py, 12, set.edge, 0.16);
           }
+          if (!world.isSolid(x - 1, y)) Gfx.rectA(px, py, 1, T, '#000', 0.45);
+          if (!world.isSolid(x + 1, y)) Gfx.rectA(px + T - 1, py, 1, T, '#000', 0.45);
         } else if (ch === '=') {
-          Gfx.rect(px, py, T, 4, style === 'grid' ? '#123a6b' : '#26364e');
-          Gfx.rect(px, py, T, 1, style === 'mumbai' ? PAL.amber : PAL.hart);
-          Gfx.rectA(px + 2, py + 4, T - 4, 1, '#000', 0.4);
+          ctx.drawImage(set.plat, px, py);
+          if (x % 5 === 0) Gfx.glow(px + T / 2, py + 1, 10, set.edge, 0.14);
         } else if (ch === '^') {
-          // a live gantry: hard structure on top, arcing underneath
+          // live gantry: hard structure, arcing underneath
           Gfx.rect(px, py, T, 3, '#39445a');
-          Gfx.rect(px, py + 3, T, 1, '#1b2331');
+          Gfx.rect(px, py, T, 1, '#5a6a86');
+          Gfx.rect(px, py + 3, T, 1, '#131a26');
           if ((x % 3) === 0) Gfx.rect(px + 6, py + 3, 3, 5, '#2b3547');
           for (var s = 0; s < 3; s++) {
             var a = t * 9 + x + s * 2;
-            var ax = px + 2 + s * 5 + Math.sin(a) * 1.5;
-            Gfx.rectA(ax, py + 5 + Math.sin(a * 1.7) * 2, 2, T - 7, PAL.raRed, 0.85);
+            var ax = px + 2 + s * 5 + Math.sin(a) * 1.6;
+            Gfx.rectA(ax, py + 5 + Math.sin(a * 1.7) * 2, 2, T - 7, PAL.raRed, 0.9);
+            Gfx.rectA(ax, py + 5, 1, 3, '#ffd0d6', 0.7);
           }
-          Gfx.glow(px + T / 2, py + T / 2, 13, PAL.raRed, 0.25);
+          Gfx.glow(px + T / 2, py + T / 2, 14, PAL.raRed, 0.28);
         }
       }
     }
   }
 
-  /* ---------- HUD ---------- */
+  /* ================= HUD ================= */
+  function panel(x, y, w, h) {
+    Gfx.rectA(x, y, w, h, '#050912', 0.72);
+    Gfx.rectA(x, y, w, 1, '#1d3050', 0.9);
+    Gfx.rectA(x, y + h - 1, w, 1, '#0a1220', 0.9);
+  }
+
   function bar(x, y, w, h, pct, fill, back, label, labelColor) {
-    Gfx.rect(x - 1, y - 1, w + 2, h + 2, 'rgba(0,0,0,0.65)');
-    Gfx.rect(x, y, w, h, back || '#16202f');
+    Gfx.rect(x - 1, y - 1, w + 2, h + 2, 'rgba(2,5,12,0.85)');
+    Gfx.rect(x, y, w, h, back || '#101a28');
     var fw = Math.max(0, Math.round(w * C.clamp(pct, 0, 1)));
     Gfx.rect(x, y, fw, h, fill);
-    Gfx.rectA(x, y, fw, 1, '#ffffff', 0.35);
+    Gfx.rectA(x, y, fw, 1, '#ffffff', 0.4);
+    Gfx.rectA(x, y + h - 1, fw, 1, '#000000', 0.25);
+    // segment ticks
+    for (var i = 1; i < 5; i++) Gfx.rectA(x + w * i / 5, y, 1, h, '#000', 0.35);
     if (label) Gfx.text(label, x, y - 9, { size: 8, color: labelColor || PAL.bone });
   }
 
   function drawHUD(game, world, player, boss) {
     var pad = 10;
-    // integrity
+    panel(pad - 4, pad - 2, 176, 48);
+
     bar(pad, pad + 10, 150, 8, player.hp / player.maxhp,
         player.hp > 30 ? PAL.green : PAL.raRed, '#0e1a12', 'SYSTEM INTEGRITY');
-    // H.A.R.T.
     bar(pad, pad + 32, 150, 6, player.hart / player.hartMax,
         player.hartDetached ? PAL.steelLite : PAL.hart, '#0c1a24',
         player.hartDetached ? 'H.A.R.T. DETACHED' : 'H.A.R.T.',
         player.hartDetached ? PAL.amber : PAL.hart);
+
+    // core icon: it beats, and it goes out when you put it down
+    var ix = pad + 162, iy = pad + 22;
+    if (player.hartDetached) {
+      Gfx.ring(ix, iy, 6, PAL.steel, 1, 0.7);
+    } else {
+      var pl = 0.6 + 0.4 * Math.sin(game.t * 4);
+      Gfx.glow(ix, iy, 10 * pl, PAL.hart, 0.5);
+      RA.spr.drawProp('hartShard', ix, iy);
+    }
     if (player.charge > 0.55) {
-      Gfx.text('CHARGED', pad + 156, pad + 31, { size: 8, color: PAL.hartGlow, glow: PAL.hart });
+      Gfx.text('CHARGED', pad + 2, pad + 42, { size: 8, color: PAL.hartGlow, glow: PAL.hart });
     }
 
-    // score / lives
-    Gfx.text('SCORE ' + String(game.score).padStart(7, '0'), VW - pad, pad, { size: 9, align: 'right', color: PAL.gold });
-    Gfx.text('LUCIFER x' + game.lives, VW - pad, pad + 12, { size: 8, align: 'right', color: PAL.bone });
+    Gfx.text('SCORE ' + String(game.score).padStart(7, '0'), VW - pad, pad,
+      { size: 9, align: 'right', color: PAL.gold });
+    Gfx.text('LUCIFER x' + game.lives, VW - pad, pad + 12,
+      { size: 8, align: 'right', color: PAL.bone });
     if (game.combo > 1) {
-      Gfx.text('x' + game.combo + ' COMBO', VW - pad, pad + 24, { size: 8, align: 'right', color: PAL.amber });
+      Gfx.text('x' + game.combo + ' COMBO', VW - pad, pad + 24,
+        { size: 8, align: 'right', color: PAL.amber, glow: PAL.amber });
     }
 
-    // level tag
-    Gfx.text(world.level.name + ' — ' + world.level.place, VW / 2, pad, { size: 8, align: 'center', color: PAL.steelLite });
+    Gfx.text(world.level.name + ' — ' + world.level.place, VW / 2, pad,
+      { size: 8, align: 'center', color: PAL.steelLite });
 
-    // level 2 timer
     if (world.level.timer) {
       var left = Math.max(0, game.timeLeft);
-      var col = left < 20 ? PAL.raRed : PAL.white;
+      var crit = left < 20;
       Gfx.text('CST IN ' + left.toFixed(1) + 's', VW / 2, pad + 12,
-        { size: 11, align: 'center', color: col, glow: left < 20 ? PAL.raRed : null });
+        { size: 11, align: 'center', color: crit ? PAL.raRed : PAL.white,
+          glow: crit ? PAL.raRed : null });
+      if (crit) Gfx.rectA(0, 0, VW, VH, PAL.raRed, 0.04 + 0.03 * Math.sin(game.t * 9));
     }
 
-    // shards
-    Gfx.text('SHARDS ' + game.shardsFound + '/' + game.shardsTotal, pad, VH - 16, { size: 8, color: PAL.amber });
+    Gfx.text('SHARDS ' + game.shardsFound + '/' + game.shardsTotal, pad, VH - 16,
+      { size: 8, color: PAL.amber });
 
-    // boss bar
     if (boss && !boss.dead && boss.intro <= 0) {
       var bw = 300, bx = (VW - bw) / 2, by = VH - 40;
-      Gfx.text(boss.name, VW / 2, by - 22, { size: 11, align: 'center', color: PAL.raRed, glow: PAL.raRed });
-      Gfx.text(boss.sub || '', VW / 2, by - 10, { size: 7, align: 'center', color: PAL.steelLite });
+      panel(bx - 8, by - 26, bw + 16, 40);
+      Gfx.text(boss.name, VW / 2, by - 22,
+        { size: 11, align: 'center', color: PAL.raRed, glow: PAL.raRed });
+      Gfx.text(boss.sub || '', VW / 2, by - 10,
+        { size: 7, align: 'center', color: PAL.steelLite });
       bar(bx, by, bw, 7, boss.hp / boss.maxhp, PAL.raRed, '#20080c');
       if (boss.phase === 1 && boss.guardMax) {
         bar(bx, by + 11, bw, 4, boss.guard / boss.guardMax, PAL.steelLite, '#111820');
       }
       if (boss.immune && boss.invulnLabel) {
-        Gfx.text(boss.invulnLabel, VW / 2, by + 18, { size: 8, align: 'center', color: PAL.amber, glow: PAL.amber });
+        Gfx.text(boss.invulnLabel, VW / 2, by + 18,
+          { size: 8, align: 'center', color: PAL.amber, glow: PAL.amber });
       } else if (boss.invulnLabel && boss.phase === 3) {
         Gfx.text(boss.invulnLabel, VW / 2, by + 18, { size: 8, align: 'center', color: PAL.gold });
       }
       if (boss.mimic) {
         Gfx.text('MIMIC ACTIVE — BLOCKING ' + (boss.blockType === 'melee' ? 'MELEE' : 'BLAST') +
-                 ' — SWITCH ATTACK', VW / 2, by + 18, { size: 8, align: 'center', color: PAL.magenta });
+                 ' — SWITCH ATTACK', VW / 2, by + 18,
+          { size: 8, align: 'center', color: PAL.magenta, glow: PAL.magenta });
       }
     }
 
-    // toasts
     for (var i = 0; i < game.toasts.length; i++) {
       var ts = game.toasts[i];
       var a = C.clamp(ts.t / 0.6, 0, 1);
-      Gfx.text(ts.msg, VW / 2, 66 + i * 14, { size: 10, align: 'center', color: ts.color, alpha: a, glow: ts.color });
+      Gfx.text(ts.msg, VW / 2, 66 + i * 14,
+        { size: 10, align: 'center', color: ts.color, alpha: a, glow: ts.color });
     }
 
     if (player.invertT > 0) {
-      Gfx.text('CONTROLS INVERTED', VW / 2, VH - 60, { size: 10, align: 'center', color: PAL.magenta, glow: PAL.magenta });
+      Gfx.text('CONTROLS INVERTED', VW / 2, VH - 60,
+        { size: 10, align: 'center', color: PAL.magenta, glow: PAL.magenta });
+      Gfx.rectA(0, 0, VW, VH, PAL.magenta, 0.05);
     }
     if (player.hartDetached) {
-      Gfx.rectA(0, 0, VW, VH, PAL.hartDeep, 0.05);
+      Gfx.rectA(0, 0, VW, VH, PAL.hartDeep, 0.06);
       Gfx.text('RUNNING ON RESIDUAL CHARGE — [H] TO RECOVER YOUR H.A.R.T.',
         VW / 2, 112, { size: 8, align: 'center', color: PAL.amber });
     }
   }
 
-  global.RA.hud = { Back: Back, scrim: scrim, drawTiles: drawTiles, drawHUD: drawHUD, bar: bar };
+  RA.hud = { Back: Back, scrim: scrim, drawTiles: drawTiles, drawHUD: drawHUD,
+             drawStalkers: drawStalkers,
+             bar: bar, panel: panel, bakeTiles: bakeTiles, TILES: TILES, h1: h1 };
 })(window);
 
 /* ===== src/game/main.js ===== */
@@ -2750,10 +3845,18 @@ html, body {
       this.toast('CODEX UNLOCKED — ' + title, PAL.gold);
       return true;
     },
+    /* Data Shards hand out the pickup pool in order. Entries flagged
+       `boss` are earned by doing the thing, not by finding a shard, so
+       they are skipped here — otherwise the tail of the list would be
+       unreachable. */
     unlockNextShard: function () {
       for (var i = 0; i < RA.CODEX.length; i++) {
         var e = RA.CODEX[i];
-        if (e.shard && !this.unlocked[e.title]) return this.unlockShardByTitle(e.title);
+        if (e.shard && !e.boss && !this.unlocked[e.title]) return this.unlockShardByTitle(e.title);
+      }
+      for (i = 0; i < RA.CODEX.length; i++) {
+        var e2 = RA.CODEX[i];
+        if (e2.shard && !this.unlocked[e2.title]) return this.unlockShardByTitle(e2.title);
       }
       this.toast('ALL DATA SHARDS RECOVERED', PAL.gold);
       return false;
@@ -2794,6 +3897,7 @@ html, body {
       this.canDetach = (lv.id === 3);
       this.timeLeft = lv.timer || 0;
       this.checkpoint = { x: this.world.spawnX, y: this.world.spawnY };
+      this.incursionsLeft = (lv.incursions || []).slice();
       this.world.cam.follow(this.player, true);
       this.arenaLeft = (lv.arenaX || 0) * T;
       this.respawnT = 0; this.clearT = 0; this.missTold = false;
@@ -3006,6 +4110,21 @@ html, body {
         }
       }
 
+      /* --- he does not wait for the end of the level --- */
+      if (this.incursionsLeft && this.incursionsLeft.length && !this.bossActive) {
+        if (p.x > this.incursionsLeft[0] * T) {
+          this.incursionsLeft.shift();
+          var ix = p.cx() + (p.face > 0 ? 120 : -120);
+          ix = C.clamp(ix, 40, w.pxW - 60);
+          var iy = p.y - 16;
+          w.actors.push(new ent.Incursion(ix, iy, this));
+          Audio.sfx('bossroar');
+          Gfx.flash(PAL.raRed, 0.45, 0.35);
+          Gfx.shake(4, 0.4);
+          this.toast('RA.ONE: WHERE IS LUCIFER?', PAL.raRed);
+        }
+      }
+
       /* --- boss gate --- */
       if (!this.bossActive && p.x > w.bossGateX && lv.boss) {
         this.bossActive = true;
@@ -3053,7 +4172,7 @@ html, body {
         a.update(dt, w, p);
         if (a.remove) { w.actors.splice(i, 1); this.bumpCombo(); continue; }
         if (C.aabb(a, p) && !p.dead) {
-          var dmg = (a.type === 'drone' && a.diveT > 0) ? 10 : 7;
+          var dmg = a.contact || ((a.type === 'drone' && a.diveT > 0) ? 10 : 7);
           p.hurt(dmg * (this.difficulty ? 1.4 : 1), w, a.cx() < p.cx() ? 1 : -1);
         }
       }
@@ -3234,7 +4353,8 @@ html, body {
 
     drawPlay: function () {
       var w = this.world, p = this.player, cam = w.cam;
-      hud.Back[w.level.bg](cam, this.t);
+      hud.Back[w.level.bg](cam, this.t, this);
+      hud.drawStalkers(w, cam, this.t);
       hud.scrim(w.level.bg);
       hud.drawTiles(w, cam, this.t);
 
@@ -3247,16 +4367,21 @@ html, body {
       }
       for (i = 0; i < w.actors.length; i++) {
         var a = w.actors[i];
-        if (Math.abs(a.cx() - cam.x - VW / 2) < VW) a.draw(cam);
+        if (Math.abs(a.cx() - cam.x - VW / 2) < VW) a.draw(cam, w);
       }
-      if (this.boss && !this.boss.dead) this.boss.draw(cam, p);
+      if (this.boss && !this.boss.dead) this.boss.draw(cam, p, w);
       p.drawHart(cam, w);
-      p.draw(cam);
+      p.draw(cam, w);
       for (i = 0; i < w.shots.length; i++) w.shots[i].draw(cam);
       w.parts.draw(cam);
 
       // level 3 arena veil
       if (w.level.bg === 'grid') Gfx.rectA(0, 0, VW, VH, '#0a1a2e', 0.10);
+
+      // bloom the world, then lay the HUD over it crisp
+      Gfx.ctx.setTransform(1, 0, 0, 1, 0, 0);
+      Gfx.post();
+      Gfx.ctx.translate(Math.round(Gfx.shakeX), Math.round(Gfx.shakeY));
 
       hud.drawHUD(this, w, p, this.boss);
 
@@ -3305,8 +4430,21 @@ html, body {
     },
 
     drawTitle: function () {
-      hud.Back.grid({ x: this.t * 30, y: 0 }, this.t);
+      hud.Back.grid({ x: this.t * 30, y: 0 }, this.t, this);
       Gfx.rectA(0, 0, VW, VH, '#02030a', 0.45);
+
+      /* the two of them, waiting, on either side of the menu */
+      var fy = VH - 46;
+      Gfx.glow(96, fy, 34, PAL.hart, 0.18);
+      Gfx.rectA(60, fy, 72, 1, PAL.hart, 0.25);
+      RA.spr.draw(RA.spr.build().gone, 'idle', Math.floor(this.t * 1.6), 96, fy, 1, {});
+      Gfx.glow(96, fy - 20, 16, PAL.hart, 0.35);
+
+      Gfx.glow(542, fy, 40, PAL.raRed, 0.16);
+      Gfx.rectA(500, fy, 84, 1, PAL.raRed, 0.22);
+      RA.bosses.drawRa(542, fy, { face: -1, anim: 'idle',
+        frame: Math.floor(this.t * 1.4), scale: 1.35 });
+
       this.logo(VW / 2, 42, true);
 
       var items = [
@@ -3356,7 +4494,7 @@ html, body {
 
     drawCodex: function () {
       Gfx.rect(0, 0, VW, VH, '#04060e');
-      hud.Back.grid({ x: this.t * 12, y: 0 }, this.t * 0.4);
+      hud.Back.grid({ x: this.t * 12, y: 0 }, this.t * 0.4, this);
       Gfx.rectA(0, 0, VW, VH, '#02030a', 0.72);
 
       var cats = this.codexCats(), list = this.codexList();
@@ -3495,7 +4633,7 @@ html, body {
 
     drawCredits: function () {
       Gfx.rect(0, 0, VW, VH, '#03040a');
-      hud.Back.grid({ x: this.t * 20, y: 0 }, this.t * 0.5);
+      hud.Back.grid({ x: this.t * 20, y: 0 }, this.t * 0.5, this);
       Gfx.rectA(0, 0, VW, VH, '#02030a', 0.7);
       this.logo(VW / 2, 26, false);
       var rows = [

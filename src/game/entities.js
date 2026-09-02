@@ -154,71 +154,43 @@
     if (world.game) world.game.addScore(this.score);
   };
 
-  /* ================= SPRITE DRAWING =================
-     Everything is drawn from rectangles at runtime. No image assets. */
-  function figure(sx, sy, o) {
-    // o: {w,h,face,phase,state,suit,trim,glow,eye,core,alpha,shadow}
-    var w = o.w || 14, h = o.h || 24, f = o.face || 1;
-    var ph = o.phase || 0, st = o.state || 'idle';
-    var c = Gfx.ctx;
-    if (o.alpha !== undefined) c.globalAlpha = o.alpha;
+  /* ================= SPRITE ACCESS =================
+     Frames are baked once at boot by engine/sprites.js; drawing a
+     character is one drawImage of a pre-composited pixel canvas. */
+  var SH = null;
+  function sheets() { return SH || (SH = global.RA.spr.build()); }
 
-    var bob = st === 'run' ? Math.round(Math.sin(ph * 2) * 1) : (st === 'idle' ? Math.round(Math.sin(ph * 0.6)) : 0);
-    var top = sy + bob;
-    var headH = Math.round(h * 0.26), torsoH = Math.round(h * 0.40), legH = h - headH - torsoH;
-    var bodyW = Math.round(w * 0.62), bx = sx + Math.round((w - bodyW) / 2);
-
-    // legs
-    var swing = st === 'run' ? Math.sin(ph * 2) * (w * 0.22)
-              : (st === 'jump' ? -w * 0.12 : (st === 'fall' ? w * 0.10 : 0));
-    var legW = Math.max(3, Math.round(bodyW * 0.38));
-    Gfx.rect(bx + swing, top + headH + torsoH, legW, legH, o.suit);
-    Gfx.rect(bx + bodyW - legW - swing, top + headH + torsoH, legW, legH, o.suit);
-    Gfx.rect(bx + swing, top + h - 2, legW, 2, o.trim);
-    Gfx.rect(bx + bodyW - legW - swing, top + h - 2, legW, 2, o.trim);
-
-    // torso
-    Gfx.rect(bx, top + headH, bodyW, torsoH, o.suit);
-    // suit seams
-    Gfx.rect(bx + 1, top + headH + 1, 1, torsoH - 2, o.trim);
-    Gfx.rect(bx + bodyW - 2, top + headH + 1, 1, torsoH - 2, o.trim);
-    Gfx.rect(bx, top + headH + torsoH - 2, bodyW, 1, o.trim);
-
-    // arms
-    var aSwing = st === 'run' ? -Math.sin(ph * 2) * (w * 0.20) : 0;
-    var armW = Math.max(2, Math.round(bodyW * 0.28));
-    if (st === 'attack') {
-      var reach = Math.round(w * (o.punchExt || 0.55));
-      Gfx.rect(f > 0 ? bx + bodyW : bx - reach, top + headH + 3, reach, armW, o.suit);
-      Gfx.rect(f > 0 ? bx + bodyW + reach - 2 : bx - reach, top + headH + 2, 2, armW + 2, o.trim);
-    } else {
-      Gfx.rect(bx - armW + 1 + aSwing, top + headH + 2, armW, Math.round(torsoH * 0.7), o.suit);
-      Gfx.rect(bx + bodyW - 1 - aSwing, top + headH + 2, armW, Math.round(torsoH * 0.7), o.suit);
+  /* pick the animation and frame for any rigged actor */
+  function poseOf(a) {
+    if (a.dashT > 0) return ['dash', 0];
+    if (a.attackT > 0 || a.strikeT > 0 || a.lungeT > 0) {
+      var t = a.attackT || a.strikeT || a.lungeT;
+      return ['punch', t > 0.16 ? 0 : 1];
     }
+    if (a.hurtT > 0) return ['hurt', 0];
+    if (!a.onGround) return [a.vy < 0 ? 'jump' : 'fall', 0];
+    if (Math.abs(a.vx) > 0.45) return ['run', Math.floor(a.anim)];
+    return ['idle', Math.floor(a.anim * 0.35)];
+  }
 
-    // head
-    var hw = Math.round(w * 0.5), hx = sx + Math.round((w - hw) / 2);
-    Gfx.rect(hx, top, hw, headH, o.suit);
-    if (o.eye) {
-      var ey = top + Math.round(headH * 0.42);
-      Gfx.rect(f > 0 ? hx + hw - 3 : hx + 1, ey, 2, 2, o.eye);
-      if (o.visor) Gfx.rect(hx, ey, hw, 1, o.eye);
+  /* a contact shadow that tightens as you approach the floor */
+  function contactShadow(a, world, cam) {
+    var ty = Math.floor((a.y + a.h + 2) / T), gy = null;
+    for (var k = 0; k < 12; k++) {
+      var t = a.y + a.h + k * T;
+      if (world.isSolid(Math.floor(a.cx() / T), Math.floor(t / T))) {
+        gy = Math.floor(t / T) * T; break;
+      }
     }
-    if (o.faceless) {
-      Gfx.rect(hx, top + 1, hw, headH - 2, o.suit);
-      Gfx.rect(hx + 1, top + Math.round(headH * 0.4), hw - 2, 1, o.trim);
-    }
-
-    // the H.A.R.T. core
-    if (o.core) {
-      var ccx = bx + bodyW / 2, ccy = top + headH + Math.round(torsoH * 0.38);
-      var pulse = 0.6 + 0.4 * Math.sin(ph * 3);
-      Gfx.glow(ccx, ccy, 9 + pulse * 4, o.glow, 0.5 * o.coreLevel);
-      Gfx.rect(ccx - 2, ccy - 2, 4, 4, o.glow);
-      Gfx.rect(ccx - 1, ccy - 3, 2, 6, o.glow);
-      Gfx.rect(ccx - 3, ccy - 1, 6, 2, o.glow);
-    }
-    if (o.alpha !== undefined) c.globalAlpha = 1;
+    if (gy === null) return;
+    var drop = C.clamp((gy - (a.y + a.h)) / 90, 0, 1);
+    var w = (a.w + 4) * (1 - drop * 0.55);
+    Gfx.ctx.globalAlpha = 0.42 * (1 - drop * 0.7);
+    Gfx.ctx.fillStyle = '#000';
+    Gfx.ctx.beginPath();
+    Gfx.ctx.ellipse(Math.round(a.cx() - cam.x), Math.round(gy - cam.y), w / 2, 2.5, 0, 0, Math.PI * 2);
+    Gfx.ctx.fill();
+    Gfx.ctx.globalAlpha = 1;
   }
 
   /* ================= PLAYER — G.ONE ================= */
@@ -404,39 +376,48 @@
     world.parts.burst(this.cx(), this.cy(), 40, { color: PAL.hart, glow: true, smax: 4, lmax: 1.2 });
   };
 
-  Player.prototype.draw = function (cam) {
-    var x = Math.round(this.x - cam.x), y = Math.round(this.y - cam.y);
+  Player.prototype.draw = function (cam, world) {
+    var fx = Math.round(this.cx() - cam.x), fy = Math.round(this.y + this.h - cam.y);
     if (this.dead) {
-      // dissolve into fragments — the way he goes at the end
-      var t = Math.min(1, this.deathT / 1.2);
-      for (var i = 0; i < 16; i++) {
-        var a = i * 1.7 + this.deathT * 2;
-        Gfx.rectA(x + 6 + Math.cos(a) * t * 24, y + 12 + Math.sin(a) * t * 22, 3, 3, PAL.ra, 1 - t);
+      // he goes the way he goes: black fragments, and the core last
+      var t = Math.min(1, this.deathT / 1.4);
+      for (var i = 0; i < 22; i++) {
+        var a = i * 1.7 + this.deathT * 2, r = t * (18 + (i % 5) * 7);
+        Gfx.rectA(fx + Math.cos(a) * r, fy - 16 + Math.sin(a) * r * 0.8,
+                  3, 3, i % 3 ? '#141924' : PAL.steel, 1 - t);
       }
-      Gfx.glow(x + 6, y + 12, 16 * (1 - t), PAL.hart, 0.5 * (1 - t));
+      Gfx.glow(fx, fy - 16, 26 * (1 - t), PAL.hart, 0.6 * (1 - t));
       return;
     }
-    if (this.invuln > 0 && Math.floor(this.invuln * 20) % 2 === 0) return;   // i-frame blink
+    if (this.invuln > 0 && Math.floor(this.invuln * 20) % 2 === 0) return;
 
-    // ground shadow
-    Gfx.rectA(x + 1, this.groundY(cam), this.w - 2, 2, '#000', 0.35);
+    if (world) contactShadow(this, world, cam);
 
-    figure(x - 1, y, {
-      w: 14, h: 24, face: this.face, phase: this.anim, state: this.state,
-      suit: this.hurtT > 0 ? PAL.white : PAL.bone,
-      trim: this.hartDetached ? PAL.steelLite : PAL.hart,
-      glow: PAL.hart, eye: PAL.hart, visor: true,
-      core: !this.hartDetached, coreLevel: C.clamp(this.hart / this.hartMax, 0.15, 1),
-      punchExt: 0.5 + this.combo * 0.08
-    });
-
-    if (this.charge > 0.55) {
-      var cxp = x + (this.face > 0 ? 18 : -4);
-      Gfx.glow(cxp, y + 11, 10 + Math.sin(this.anim * 4) * 3, PAL.hartGlow, 0.7);
+    var pose = poseOf(this);
+    var trail = this.dashT > 0 || Math.abs(this.vx) > 3.4;
+    if (trail) {
+      for (var k = 1; k <= 3; k++) {
+        global.RA.spr.draw(sheets().gone, pose[0], pose[1],
+          fx - this.face * k * 5, fy, this.face, { alpha: 0.16 * (4 - k) / 3 });
+      }
     }
-    if (this.dashT > 0) Gfx.glow(x + 6, y + 12, 18, PAL.hart, 0.35);
+    global.RA.spr.draw(sheets().gone, pose[0], pose[1], fx, fy, this.face,
+      { flash: this.hurtT > 0 ? '#ffffff' : null });
+
+    // the H.A.R.T. throws real light while it is in his chest
+    if (!this.hartDetached) {
+      var lv = C.clamp(this.hart / this.hartMax, 0.2, 1);
+      var pulse = 0.75 + 0.25 * Math.sin(this.anim * 0.9);
+      Gfx.glow(fx, fy - 20, (13 + lv * 9) * pulse, PAL.hart, 0.38 * lv);
+      Gfx.glow(fx, fy - 20, 5, PAL.hartGlow, 0.5 * lv);
+    }
+    if (this.charge > 0.55) {
+      var cxp = fx + this.face * 13;
+      Gfx.glow(cxp, fy - 18, 9 + Math.sin(this.anim * 3) * 3, PAL.hartGlow, 0.8);
+      Gfx.ring(cxp, fy - 18, 7 + Math.sin(this.anim * 2) * 2, PAL.hart, 1, 0.7);
+    }
+    if (this.dashT > 0) Gfx.glow(fx, fy - 16, 22, PAL.hart, 0.4);
   };
-  Player.prototype.groundY = function (cam) { return Math.round(this.y + this.h - cam.y - 1); };
 
   /* the detached H.A.R.T., lying on the floor being important */
   Player.prototype.drawHart = function (cam, world) {
@@ -444,11 +425,10 @@
     var o = this.hartObj;
     var x = Math.round(o.x - cam.x), y = Math.round(o.y - cam.y);
     var p = 0.6 + 0.4 * Math.sin(o.t * 5);
-    Gfx.glow(x, y, 14 + p * 8, PAL.hart, 0.55);
-    Gfx.rect(x - 3, y - 3, 6, 6, PAL.hartGlow);
-    Gfx.rect(x - 1, y - 6, 2, 12, PAL.hart);
-    Gfx.rect(x - 6, y - 1, 12, 2, PAL.hart);
-    Gfx.ring(x, y, 10 + p * 4, PAL.hart, 1, 0.5);
+    Gfx.glow(x, y, 16 + p * 10, PAL.hart, 0.6);
+    global.RA.spr.drawProp('hartShard', x, y + Math.sin(o.t * 2) * 1.5);
+    Gfx.ring(x, y, 11 + p * 5, PAL.hart, 1, 0.45);
+    Gfx.ring(x, y, 17 + p * 9, PAL.hart, 1, 0.18);
   };
   Player.prototype.updateHart = function (dt, world) {
     var o = this.hartObj; if (!o) return;
@@ -506,21 +486,22 @@
   }
   Pickup.prototype.update = function (dt) { this.t += dt; };
   Pickup.prototype.draw = function (cam) {
-    var x = Math.round(this.x - cam.x + 6), y = Math.round(this.y - cam.y + 6 + Math.sin(this.t * 2.4) * 2);
+    var x = Math.round(this.x - cam.x + 6);
+    var y = Math.round(this.y - cam.y + 6 + Math.sin(this.t * 2.4) * 2.5);
+    var p = 0.5 + 0.5 * Math.sin(this.t * 3);
     if (this.kind === 'hart') {
-      Gfx.glow(x, y, 12, PAL.hart, 0.45);
-      Gfx.rect(x - 1, y - 5, 2, 10, PAL.hart); Gfx.rect(x - 5, y - 1, 10, 2, PAL.hart);
-      Gfx.rect(x - 2, y - 2, 4, 4, PAL.hartGlow);
+      Gfx.glow(x, y, 13 + p * 4, PAL.hart, 0.45);
+      global.RA.spr.drawProp('hartShard', x, y);
     } else if (this.kind === 'repair') {
-      Gfx.glow(x, y, 12, PAL.green, 0.4);
-      Gfx.rect(x - 5, y - 2, 10, 4, PAL.green); Gfx.rect(x - 2, y - 5, 4, 10, PAL.green);
+      Gfx.glow(x, y, 12, PAL.green, 0.35);
+      global.RA.spr.drawProp('repairCell', x, y);
+      Gfx.rectA(x - 4, y - 1, 8, 2, PAL.green, 0.9);
+      Gfx.rectA(x - 1, y - 4, 2, 8, PAL.green, 0.9);
     } else {
-      var p = 0.5 + 0.5 * Math.sin(this.t * 3);
-      Gfx.glow(x, y, 14, PAL.gold, 0.35 + p * 0.25);
-      Gfx.rect(x - 4, y - 5, 8, 10, PAL.amber);
-      Gfx.rect(x - 3, y - 4, 6, 8, PAL.gold);
-      Gfx.rect(x - 1, y - 3, 2, 6, PAL.void);
-      Gfx.ring(x, y, 9 + p * 3, PAL.gold, 1, 0.4);
+      Gfx.glow(x, y, 15 + p * 6, PAL.gold, 0.4 + p * 0.2);
+      global.RA.spr.drawProp('dataShard', x, y);
+      Gfx.ring(x, y, 9 + p * 4, PAL.gold, 1, 0.45);
+      Gfx.ring(x, y, 14 + p * 8, PAL.gold, 1, 0.18);
     }
   };
 
@@ -556,15 +537,13 @@
     world.move(this, this.vx, this.vy);
     if (this.onGround) this.vx *= 0.86;
   };
-  Sentry.prototype.draw = function (cam) {
-    var x = Math.round(this.x - cam.x), y = Math.round(this.y - cam.y);
-    Gfx.rectA(x + 1, y + this.h - 1, this.w - 2, 2, '#000', 0.3);
-    figure(x - 1, y, {
-      w: 14, h: 24, face: this.face, phase: this.anim,
-      state: this.lungeT > 0 ? 'attack' : (Math.abs(this.vx) > 0.4 ? 'run' : 'idle'),
-      suit: this.hurtT > 0 ? PAL.white : PAL.steel, trim: PAL.raRed,
-      glow: PAL.raRed, eye: PAL.raRed, visor: true, core: false
-    });
+  Sentry.prototype.draw = function (cam, world) {
+    var fx = Math.round(this.cx() - cam.x), fy = Math.round(this.y + this.h - cam.y);
+    if (world) contactShadow(this, world, cam);
+    var pose = poseOf(this);
+    global.RA.spr.draw(sheets().sentry, pose[0], pose[1], fx, fy, this.face,
+      { flash: this.hurtT > 0 ? '#ffd7d7' : null });
+    Gfx.glow(fx, fy - 22, 7, PAL.raRed, 0.35);
   };
 
   /* RA-Drone — patrols the air, drops on you */
@@ -604,14 +583,18 @@
     }
   };
   Drone.prototype.draw = function (cam) {
-    var x = Math.round(this.x - cam.x), y = Math.round(this.y - cam.y);
-    var w = this.w, s = Math.sin(this.anim) * 2;
-    Gfx.glow(x + w / 2, y + 6, 12, PAL.raRed, this.diveT > 0 ? 0.5 : 0.28);
-    Gfx.rect(x, y + 3, w, 6, this.hurtT > 0 ? PAL.white : PAL.steel);
-    Gfx.rect(x + 2, y + 1, w - 4, 3, PAL.steelLite);
-    Gfx.rect(x - 2, y + 4 + s, 3, 2, PAL.steelLite);
-    Gfx.rect(x + w - 1, y + 4 - s, 3, 2, PAL.steelLite);
-    Gfx.rect(x + (this.face > 0 ? w - 4 : 2), y + 5, 2, 2, PAL.raRed);
+    var cxp = Math.round(this.cx() - cam.x), cyp = Math.round(this.cy() - cam.y);
+    var s = Math.sin(this.anim * 2) * 2;
+    Gfx.glow(cxp, cyp, this.diveT > 0 ? 18 : 12, PAL.raRed, this.diveT > 0 ? 0.55 : 0.3);
+    global.RA.spr.drawProp('droneWing', cxp - 9, cyp + s, { flip: -1 });
+    global.RA.spr.drawProp('droneWing', cxp + 9, cyp - s);
+    global.RA.spr.drawProp('drone', cxp, cyp, { flip: this.face });
+    if (this.hurtT > 0) {
+      Gfx.rectA(cxp - 8, cyp - 4, 16, 8, '#ffffff', 0.7);
+    }
+    if (this.diveT > 0) {
+      Gfx.rectA(cxp - this.vx * 3, cyp - this.vy * 3, 2, 2, PAL.raRed, 0.6);
+    }
   };
 
   /* Akashi Mask — moves on the motion-capture Akashi recorded */
@@ -648,16 +631,20 @@
     world.move(this, this.vx, this.vy);
     if (this.onGround) this.vx *= 0.8;
   };
-  Mask.prototype.draw = function (cam) {
-    var x = Math.round(this.x - cam.x), y = Math.round(this.y - cam.y);
-    Gfx.rectA(x + 1, y + this.h - 1, this.w - 2, 2, '#000', 0.3);
-    if (this.blinkT > 0) Gfx.glow(x + 6, y + 12, 16, PAL.magenta, 0.4);
-    figure(x - 1, y, {
-      w: 14, h: 24, face: this.face, phase: this.anim,
-      state: this.strikeT > 0 ? 'attack' : (Math.abs(this.vx) > 0.5 ? 'run' : 'idle'),
-      suit: this.hurtT > 0 ? PAL.white : '#3a2a44', trim: PAL.magenta,
-      glow: PAL.magenta, eye: PAL.magenta, faceless: true, core: false
-    });
+  Mask.prototype.draw = function (cam, world) {
+    var fx = Math.round(this.cx() - cam.x), fy = Math.round(this.y + this.h - cam.y);
+    if (world) contactShadow(this, world, cam);
+    var pose = poseOf(this);
+    if (this.blinkT > 0) {
+      Gfx.glow(fx, fy - 16, 20, PAL.magenta, 0.5);
+      for (var k = 1; k <= 2; k++) {
+        global.RA.spr.draw(sheets().mask, pose[0], pose[1],
+          fx - this.face * k * 9, fy, this.face, { alpha: 0.22 / k });
+      }
+    }
+    global.RA.spr.draw(sheets().mask, pose[0], pose[1], fx, fy, this.face,
+      { flash: this.hurtT > 0 ? '#ffffff' : null });
+    Gfx.glow(fx, fy - 24, 8, PAL.magenta, 0.35);
   };
 
   /* Firewall Turret — bolted to the floor, unimpressed */
@@ -685,17 +672,112 @@
     }
   };
   Turret.prototype.draw = function (cam) {
-    var x = Math.round(this.x - cam.x), y = Math.round(this.y - cam.y);
-    Gfx.rect(x, y + 6, 12, 6, this.hurtT > 0 ? PAL.white : PAL.steel);
-    Gfx.rect(x + 2, y + 2, 8, 6, PAL.steelLite);
-    var bx = x + 6 + Math.cos(this.aim) * 7, by = y + 5 + Math.sin(this.aim) * 7;
-    Gfx.line(x + 6, y + 5, bx, by, PAL.raRed, 2);
-    Gfx.glow(x + 6, y + 5, 7, PAL.raRed, 0.3);
+    var cxp = Math.round(this.cx() - cam.x), cyp = Math.round(this.cy() - cam.y);
+    var bx = cxp + Math.cos(this.aim) * 9, by = cyp - 2 + Math.sin(this.aim) * 9;
+    Gfx.line(cxp, cyp - 2, bx, by, '#3d4a5f', 3);
+    Gfx.line(cxp, cyp - 2, bx, by, PAL.raRed, 1);
+    global.RA.spr.drawProp('turret', cxp, cyp);
+    if (this.hurtT > 0) Gfx.rectA(cxp - 6, cyp - 4, 12, 8, '#ffffff', 0.7);
+    Gfx.glow(bx, by, 6, PAL.raRed, 0.4 + (this.cool < 0.4 ? 0.4 : 0));
+  };
+
+  /* ================= RA.ONE INCURSION =================
+     The film's most common complaint is that its villain is barely in it.
+     So he interrupts you mid-level: phases in, asks his one question,
+     takes a swing, phases out. He cannot be killed here — a player can
+     only be killed in the third level, and so can he. */
+  function Incursion(x, y, game) {
+    Actor.call(this, x, y, 22, 40);
+    this.type = 'incursion';
+    this.game = game;
+    this.phase = 'in'; this.pt = 0; this.hits = 0;
+    this.cool = 0.9; this.act = null; this.actT = 0;
+    this.anim = 0; this.face = -1; this.score = 0;
+    this.invulnerable = true; this.contact = 11;
+  }
+  Incursion.prototype = Object.create(Actor.prototype);
+  Incursion.prototype.constructor = Incursion;
+
+  Incursion.prototype.damage = function (n, world) {
+    // you cannot hurt him, but you can make him lose interest
+    this.hits++;
+    this.hurtT = 0.1;
+    world.parts.burst(this.cx(), this.cy(), 6, { color: PAL.steelLite, smax: 2, lmax: 0.3 });
+    if (this.hits === 1 && this.game) this.game.toast('HE CANNOT BE KILLED HERE', PAL.steelLite);
+    if (this.hits > 9 && this.phase === 'act') { this.phase = 'out'; this.pt = 0; }
+    return false;
+  };
+
+  Incursion.prototype.update = function (dt, world, player) {
+    this.pt += dt; this.anim += dt * 8;
+    if (this.hurtT > 0) this.hurtT -= dt;
+    var dx = player.cx() - this.cx();
+    this.face = dx > 0 ? 1 : -1;
+
+    if (this.phase === 'in') {
+      if (this.pt > 0.7) { this.phase = 'act'; this.pt = 0; }
+      return;
+    }
+    if (this.phase === 'out') {
+      if (this.pt > 0.5) this.remove = true;
+      return;
+    }
+
+    // act
+    if (this.pt > 7.5) { this.phase = 'out'; this.pt = 0; return; }
+    this.vy = Math.min(this.vy + 0.46, 12);
+    if (this.act === 'rush') {
+      this.actT -= dt;
+      this.vx = this.face * 5.6;
+      if (this.actT <= 0 || this.hitWall) { this.act = null; this.hitWall = false; this.cool = 1.1; }
+    } else if (this.act === 'bolt') {
+      this.actT -= dt;
+      if (this.actT <= 0) {
+        Audio.sfx('blast');
+        for (var i = -1; i <= 1; i++) {
+          var a = Math.atan2(player.cy() - this.cy(), player.cx() - this.cx()) + i * 0.22;
+          world.spawnShot({ x: this.cx(), y: this.cy(), vx: Math.cos(a) * 4.2, vy: Math.sin(a) * 4.2,
+            w: 8, h: 5, dmg: 9, owner: 'enemy', color: PAL.raRed, life: 2.2 });
+        }
+        this.act = null; this.cool = 1.2;
+      }
+    } else {
+      this.vx = C.approach(this.vx, Math.abs(dx) > 90 ? this.face * 1.8 : 0, 0.25);
+      this.cool -= dt;
+      if (this.cool <= 0) {
+        if (Math.abs(dx) < 130 && Math.random() < 0.45) { this.act = 'rush'; this.actT = 0.5; }
+        else { this.act = 'bolt'; this.actT = 0.35; }
+      }
+    }
+    this.onGround = false;
+    world.move(this, this.vx, this.vy);
+    if (this.onGround && !this.act) this.vx *= 0.9;
+  };
+
+  Incursion.prototype.draw = function (cam, world) {
+    var fx = Math.round(this.cx() - cam.x), fy = Math.round(this.y + this.h - cam.y);
+    var a = 1;
+    if (this.phase === 'in') a = C.clamp(this.pt / 0.7, 0, 1);
+    if (this.phase === 'out') a = 1 - C.clamp(this.pt / 0.5, 0, 1);
+    if (a < 1) {
+      // materialising: torn scanlines resolving into a body
+      for (var i = 0; i < 10; i++) {
+        Gfx.rectA(fx - 20 + Math.random() * 40, fy - Math.random() * 44,
+                  18, 2, PAL.raSeam, 0.5 * (1 - a));
+      }
+    }
+    if (world && a > 0.9) contactShadow(this, world, cam);
+    var pose = this.act === 'rush' ? ['run', Math.floor(this.anim)]
+             : (this.act === 'bolt' ? ['cast', 1] : ['idle', Math.floor(this.anim * 0.35)]);
+    global.RA.bosses.drawRa(fx, fy, {
+      face: this.face, anim: pose[0], frame: pose[1],
+      hurt: this.hurtT > 0, alpha: a, trail: this.act === 'rush'
+    });
   };
 
   global.RA.ent = {
     World: World, Player: Player, Shot: Shot, Pickup: Pickup,
-    Sentry: Sentry, Drone: Drone, Mask: Mask, Turret: Turret,
-    Actor: Actor, figure: figure
+    Sentry: Sentry, Drone: Drone, Mask: Mask, Turret: Turret, Incursion: Incursion,
+    Actor: Actor, sheets: sheets, poseOf: poseOf, contactShadow: contactShadow
   };
 })(window);

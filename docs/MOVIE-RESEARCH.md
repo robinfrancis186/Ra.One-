@@ -117,6 +117,40 @@ Those four rules are the entire design brief for our Level 3.
 
 ---
 
+## 3b. Reception — what people actually say about it
+
+> **A note on sources.** Reddit was the first place asked for, and it is unreachable from this
+> environment: the search API refuses reddit.com outright, and direct fetches of reddit.com and
+> old.reddit.com are blocked by the network egress proxy. The sentiment below is therefore drawn
+> from IMDb and Metacritic user reviews, Rotten Tomatoes audience reviews, Quora threads and
+> contemporary press — not from Reddit, and it is not presented as if it were.
+
+**Praised.** The visual effects, the action, the music, the direction, and the performances of
+Khan and Rampal. Plenty of viewers still argue it is the best-looking Indian science fiction of
+its moment, and that it was ahead of what the industry could support in 2011.
+
+**Criticised.** The script above all — plot holes, tonal swings between superhero picture and
+family comedy, tacky humour, and a middle stretch that sags. A recurring line is that the effects
+were given precedence over the story.
+
+**The complaint that comes up most.** *Ra.One himself is barely in the film.* Arjun Rampal's
+villain — widely agreed to be the best thing in it — has very little screen time, and Kareena
+Kapoor's Sonia is squeezed too. Audiences wanted much more of the antagonist they were sold.
+
+**The reappraisal.** The reception is polarised rather than negative: a large group enjoys it
+knowingly, flaws included, and the film's standing has recovered as an ambitious, expensive,
+strange swing at an Indian superhero that nobody else was taking.
+
+**Shah Rukh Khan's own framing** (worth quoting, because it explains the ending):
+
+> "Ra.One is the modern, new-age technology version of our mythological 'Raavan', who was a
+> mixture of ten different evil characters. I am essaying the role of G.One, or better said
+> 'Jeevan', a superhero who saves mankind from Ra.One's torment. Through this film, I want to
+> prove that Indian superheroes can also be as cool as the international ones."
+
+Ten evil characters. Ten copies in the third level. That is not a coincidence, and the game now
+puts ten heads in the sky above the final fight.
+
 ## 4. Soundtrack (Vishal–Shekhar, T-Series, released 21 September 2011, 15 tracks)
 
 | Song | Performed by |
@@ -182,3 +216,11 @@ we were chasing is the *arcade cabinet*, not the 2011 console brawler.
 - [Ra.One: The Game (2011) — MobyGames](https://www.mobygames.com/game/74372/raone-the-game/)
 - [RA.ONE The Game — Giant Bomb](https://giantbomb.com/wiki/Games/RA_ONE_The_Game)
 - [Ra. One (2011) — Box Office, The Numbers](https://www.the-numbers.com/movie/Ra-One)
+- [Ra.One (2011) — User reviews, IMDb](https://www.imdb.com/title/tt1562871/reviews/)
+- [RA. One — User reviews, Metacritic](https://www.metacritic.com/movie/ra-one/user-reviews/)
+- [RA. One — Rotten Tomatoes audience reviews](https://www.rottentomatoes.com/m/ra_one_2011/reviews?type=user)
+- [Is Ra.One an underrated movie? — Quora](https://www.quora.com/Is-Ra-One-an-underrated-movie-If-yes-then-why)
+- [Reviewing the Reviews: RA.One — MxMIndia](https://www.mxmindia.com/blogs/reviewing-the-reviews-ra-one/)
+- [G.One (character) — EverybodyWiki](https://en.everybodywiki.com/G.One_(character))
+- [List of accolades received by Ra.One — Wikipedia](https://en.wikipedia.org/wiki/List_of_accolades_received_by_Ra.One)
+- [Bollywood's Superhero Genre — Antenna, UW-Madison](https://blog.commarts.wisc.edu/2015/09/24/bollywood-superheroes)

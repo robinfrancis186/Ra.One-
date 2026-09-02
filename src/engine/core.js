@@ -59,9 +59,68 @@
       canvas.width = VIEW_W; canvas.height = VIEW_H;
       this.ctx = canvas.getContext('2d');
       this.ctx.imageSmoothingEnabled = false;
+      this.initPost();
       this.resize();
       global.addEventListener('resize', this.resize.bind(this));
       return this;
+    },
+
+    /* ---------- post-processing ----------
+       A bright-pass + blur composited back additively. Every glow, every
+       neon edge, every muzzle flash gets real bloom out of it, which is
+       most of the difference between "shapes on a background" and "light". */
+    initPost: function () {
+      this.postOn = true;
+      this.bloomScale = 3;
+      var bw = Math.ceil(VIEW_W / this.bloomScale), bh = Math.ceil(VIEW_H / this.bloomScale);
+      this.bloomCv = document.createElement('canvas');
+      this.bloomCv.width = bw; this.bloomCv.height = bh;
+      this.bloomCtx = this.bloomCv.getContext('2d');
+      this.bloomAmt = 0.45;
+
+      // one tile of static, shifted every frame — analog noise for free
+      var g = document.createElement('canvas');
+      g.width = 128; g.height = 128;
+      var gc = g.getContext('2d');
+      var img = gc.createImageData(128, 128), d = img.data;
+      for (var i = 0; i < 128 * 128; i++) {
+        var v = Math.random() * 255;
+        d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = v;
+        d[i * 4 + 3] = 14;
+      }
+      gc.putImageData(img, 0, 0);
+      this.grainCv = g;
+    },
+
+    post: function () {
+      if (!this.postOn || this.postDone) return;
+      this.postDone = true;
+      var c = this.ctx, b = this.bloomCtx;
+      var bw = this.bloomCv.width, bh = this.bloomCv.height;
+      try {
+        b.setTransform(1, 0, 0, 1, 0, 0);
+        b.globalCompositeOperation = 'source-over';
+        b.clearRect(0, 0, bw, bh);
+        b.filter = 'brightness(1.05) contrast(3.4) blur(2px)';
+        b.drawImage(this.canvas, 0, 0, bw, bh);
+        b.filter = 'none';
+        c.save();
+        c.globalCompositeOperation = 'lighter';
+        c.globalAlpha = this.bloomAmt;
+        c.imageSmoothingEnabled = true;
+        c.drawImage(this.bloomCv, 0, 0, VIEW_W, VIEW_H);
+        c.imageSmoothingEnabled = false;
+        c.restore();
+      } catch (e) { this.postOn = false; }
+
+      // grain, drifting so it never looks like a stuck texture
+      c.save();
+      c.globalAlpha = 0.34;
+      var ox = -Math.floor(Math.random() * 128), oy = -Math.floor(Math.random() * 128);
+      for (var x = ox; x < VIEW_W; x += 128) {
+        for (var y = oy; y < VIEW_H; y += 128) c.drawImage(this.grainCv, x, y);
+      }
+      c.restore();
     },
 
     resize: function () {
@@ -96,11 +155,13 @@
       c.setTransform(1, 0, 0, 1, 0, 0);
       c.fillStyle = PAL.void;
       c.fillRect(0, 0, VIEW_W, VIEW_H);
+      this.postDone = false;
       c.translate(Math.round(this.shakeX), Math.round(this.shakeY));
     },
     end: function () {
       var c = this.ctx;
       c.setTransform(1, 0, 0, 1, 0, 0);
+      this.post();
       if (this.flashT > 0) {
         c.globalAlpha = clamp(this.flashAlpha * this.flashT * 6, 0, 1);
         c.fillStyle = this.flashColor;
