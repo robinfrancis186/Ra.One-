@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>RA.ONE — Lucifer Protocol</title>
+<meta name="description" content="An unofficial arcade fan tribute to Ra.One (2011): three levels, one H.A.R.T., one bullet, ten copies and a single shadow.">
+<link rel="stylesheet" href="src/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' fill='%2305060b'/><rect x='14' y='6' width='4' height='20' fill='%2338d8ff'/><rect x='6' y='14' width='20' height='4' fill='%2338d8ff'/></svg>">
+</head>
+<body>
+  <div id="cabinet">
+    <div id="stage">
+      <canvas id="screen" width="640" height="360"></canvas>
+      <div id="scanlines"></div>
+      <div id="vignette"></div>
+      <div id="glare"></div>
+    </div>
+  </div>
+
+  <div id="touchpad">
+    <div class="cluster">
+      <button data-act="left">&#9664;</button>
+      <button data-act="right">&#9654;</button>
+    </div>
+    <div class="cluster">
+      <div class="col">
+        <button data-act="hart">H</button>
+        <button data-act="dash">DSH</button>
+      </div>
+      <div class="col">
+        <button data-act="blast">BLST</button>
+        <button data-act="hit">HIT</button>
+      </div>
+      <div class="col">
+        <button data-act="start" class="wide">ENT</button>
+        <button data-act="jump" class="wide">JUMP</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="src/engine/core.js"></script>
+  <script src="src/engine/input.js"></script>
+  <script src="src/engine/audio.js"></script>
+  <script src="src/data/lore.js"></script>
+  <script src="src/game/levels.js"></script>
+  <script src="src/game/entities.js"></script>
+  <script src="src/game/bosses.js"></script>
+  <script src="src/game/hud.js"></script>
+  <script src="src/game/main.js"></script>
+</body>
+</html>

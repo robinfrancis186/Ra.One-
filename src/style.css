@@ -1,0 +1,84 @@
+/* RA.ONE — LUCIFER PROTOCOL : cabinet shell */
+:root {
+  --hart: #38d8ff;
+  --ra: #ff2f45;
+  --ink: #05060b;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; padding: 0; height: 100%;
+  background: #000;
+  color: #c8d4e6;
+  font-family: "Courier New", ui-monospace, monospace;
+  overflow: hidden;
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+}
+#cabinet {
+  position: fixed; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  background:
+    radial-gradient(circle at 50% 40%, #101a2c 0%, #05060b 55%, #000 100%);
+}
+#stage {
+  position: relative;
+  width: min(100vw, 177.78vh);
+  height: min(100vh, 56.25vw);
+  display: flex; align-items: center; justify-content: center;
+}
+#screen {
+  display: block;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  background: #05060b;
+  border-radius: 4px;
+  box-shadow:
+    0 0 0 2px #0d1626,
+    0 0 0 6px #060a12,
+    0 0 40px rgba(56, 216, 255, 0.12),
+    0 0 120px rgba(255, 47, 69, 0.06);
+}
+/* CRT overlays sit on top of the canvas, never in the render loop */
+#scanlines, #vignette, #glare {
+  position: absolute; inset: 0; pointer-events: none; border-radius: 4px;
+}
+#scanlines {
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0.00) 0px,
+    rgba(0, 0, 0, 0.00) 2px,
+    rgba(0, 0, 0, 0.22) 3px,
+    rgba(0, 0, 0, 0.22) 4px
+  );
+  mix-blend-mode: multiply;
+}
+#vignette {
+  background: radial-gradient(ellipse at center,
+    rgba(0,0,0,0) 55%, rgba(0,0,0,0.55) 100%);
+}
+#glare {
+  background: linear-gradient(120deg,
+    rgba(255,255,255,0.05) 0%, rgba(255,255,255,0) 32%);
+}
+#hint {
+  position: fixed; left: 0; right: 0; bottom: 6px;
+  text-align: center; font-size: 11px; letter-spacing: 1px;
+  color: #2b3a52;
+}
+/* touch controls — only shown on touch devices */
+#touchpad {
+  position: fixed; inset: auto 0 0 0; height: 40vh;
+  display: none; justify-content: space-between; align-items: flex-end;
+  padding: 12px; pointer-events: none;
+}
+#touchpad .cluster { display: flex; gap: 10px; pointer-events: auto; }
+#touchpad .col { display: flex; flex-direction: column; gap: 10px; }
+#touchpad button {
+  width: 58px; height: 58px; border-radius: 50%;
+  background: rgba(20, 32, 52, 0.65);
+  border: 2px solid rgba(56, 216, 255, 0.45);
+  color: #c8d4e6; font: bold 12px "Courier New", monospace;
+  touch-action: none; user-select: none;
+}
+#touchpad button.on { background: rgba(56, 216, 255, 0.35); }
+#touchpad button.wide { width: 74px; }

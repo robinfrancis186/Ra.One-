@@ -1,0 +1,3518 @@
+<title>RA.ONE — Lucifer Protocol</title>
+<style>
+/* RA.ONE — LUCIFER PROTOCOL : cabinet shell */
+:root {
+  --hart: #38d8ff;
+  --ra: #ff2f45;
+  --ink: #05060b;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; padding: 0; height: 100%;
+  background: #000;
+  color: #c8d4e6;
+  font-family: "Courier New", ui-monospace, monospace;
+  overflow: hidden;
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+}
+#cabinet {
+  position: fixed; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  background:
+    radial-gradient(circle at 50% 40%, #101a2c 0%, #05060b 55%, #000 100%);
+}
+#stage {
+  position: relative;
+  width: min(100vw, 177.78vh);
+  height: min(100vh, 56.25vw);
+  display: flex; align-items: center; justify-content: center;
+}
+#screen {
+  display: block;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  background: #05060b;
+  border-radius: 4px;
+  box-shadow:
+    0 0 0 2px #0d1626,
+    0 0 0 6px #060a12,
+    0 0 40px rgba(56, 216, 255, 0.12),
+    0 0 120px rgba(255, 47, 69, 0.06);
+}
+/* CRT overlays sit on top of the canvas, never in the render loop */
+#scanlines, #vignette, #glare {
+  position: absolute; inset: 0; pointer-events: none; border-radius: 4px;
+}
+#scanlines {
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0.00) 0px,
+    rgba(0, 0, 0, 0.00) 2px,
+    rgba(0, 0, 0, 0.22) 3px,
+    rgba(0, 0, 0, 0.22) 4px
+  );
+  mix-blend-mode: multiply;
+}
+#vignette {
+  background: radial-gradient(ellipse at center,
+    rgba(0,0,0,0) 55%, rgba(0,0,0,0.55) 100%);
+}
+#glare {
+  background: linear-gradient(120deg,
+    rgba(255,255,255,0.05) 0%, rgba(255,255,255,0) 32%);
+}
+#hint {
+  position: fixed; left: 0; right: 0; bottom: 6px;
+  text-align: center; font-size: 11px; letter-spacing: 1px;
+  color: #2b3a52;
+}
+/* touch controls — only shown on touch devices */
+#touchpad {
+  position: fixed; inset: auto 0 0 0; height: 40vh;
+  display: none; justify-content: space-between; align-items: flex-end;
+  padding: 12px; pointer-events: none;
+}
+#touchpad .cluster { display: flex; gap: 10px; pointer-events: auto; }
+#touchpad .col { display: flex; flex-direction: column; gap: 10px; }
+#touchpad button {
+  width: 58px; height: 58px; border-radius: 50%;
+  background: rgba(20, 32, 52, 0.65);
+  border: 2px solid rgba(56, 216, 255, 0.45);
+  color: #c8d4e6; font: bold 12px "Courier New", monospace;
+  touch-action: none; user-select: none;
+}
+#touchpad button.on { background: rgba(56, 216, 255, 0.35); }
+#touchpad button.wide { width: 74px; }
+
+</style>
+
+<div id="cabinet">
+    <div id="stage">
+      <canvas id="screen" width="640" height="360"></canvas>
+      <div id="scanlines"></div>
+      <div id="vignette"></div>
+      <div id="glare"></div>
+    </div>
+  </div>
+
+  <div id="touchpad">
+    <div class="cluster">
+      <button data-act="left">&#9664;</button>
+      <button data-act="right">&#9654;</button>
+    </div>
+    <div class="cluster">
+      <div class="col">
+        <button data-act="hart">H</button>
+        <button data-act="dash">DSH</button>
+      </div>
+      <div class="col">
+        <button data-act="blast">BLST</button>
+        <button data-act="hit">HIT</button>
+      </div>
+      <div class="col">
+        <button data-act="start" class="wide">ENT</button>
+        <button data-act="jump" class="wide">JUMP</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+/* ===== src/engine/core.js ===== */
+/* =============================================================
+   RA.ONE — LUCIFER PROTOCOL
+   engine/core.js — maths, palette, renderer, particles, camera
+   ============================================================= */
+(function (global) {
+  'use strict';
+
+  var VIEW_W = 640, VIEW_H = 360, TILE = 16;
+
+  /* ---------- maths ---------- */
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function approach(v, target, step) {
+    if (v < target) return Math.min(v + step, target);
+    if (v > target) return Math.max(v - step, target);
+    return v;
+  }
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function randInt(a, b) { return Math.floor(rand(a, b + 1)); }
+  function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+  function aabb(a, b) {
+    return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+  }
+  function dist(ax, ay, bx, by) { var dx = ax - bx, dy = ay - by; return Math.sqrt(dx * dx + dy * dy); }
+
+  /* ---------- palette ----------
+     Movie-derived: G.One is white/graphite with cyan H.A.R.T. light,
+     Ra.One is black/graphite with hot white-blue seams and red scan-eyes. */
+  var PAL = {
+    void:      '#05060b',
+    deep:      '#0a0f1c',
+    grid:      '#12203a',
+    steel:     '#28374f',
+    steelLite: '#42556f',
+    white:     '#eef4ff',
+    bone:      '#c8d4e6',
+    hart:      '#38d8ff',
+    hartDeep:  '#0b7fb5',
+    hartGlow:  '#a8f2ff',
+    ra:        '#1e232e',
+    raSeam:    '#dfe9ff',
+    raRed:     '#ff2f45',
+    amber:     '#ffb400',
+    gold:      '#ffdf5a',
+    saffron:   '#ff7a1a',
+    green:     '#3ef08a',
+    magenta:   '#ff3fd0',
+    shadow:    'rgba(0,0,0,0.45)'
+  };
+
+  /* ---------- renderer ---------- */
+  var Gfx = {
+    canvas: null, ctx: null,
+    shakeT: 0, shakeMag: 0, shakeX: 0, shakeY: 0,
+    flashT: 0, flashColor: '#ffffff', flashAlpha: 0,
+
+    init: function (canvas) {
+      this.canvas = canvas;
+      canvas.width = VIEW_W; canvas.height = VIEW_H;
+      this.ctx = canvas.getContext('2d');
+      this.ctx.imageSmoothingEnabled = false;
+      this.resize();
+      global.addEventListener('resize', this.resize.bind(this));
+      return this;
+    },
+
+    resize: function () {
+      var wrap = this.canvas.parentElement;
+      if (!wrap) return;
+      var aw = wrap.clientWidth || VIEW_W, ah = wrap.clientHeight || VIEW_H;
+      var scale = Math.min(aw / VIEW_W, ah / VIEW_H);
+      if (scale > 1) scale = Math.max(1, Math.floor(scale * 2) / 2); // half-steps keep it crisp
+      this.canvas.style.width = Math.round(VIEW_W * scale) + 'px';
+      this.canvas.style.height = Math.round(VIEW_H * scale) + 'px';
+    },
+
+    shake: function (mag, time) {
+      if (mag > this.shakeMag || this.shakeT <= 0) { this.shakeMag = mag; this.shakeT = time; }
+    },
+    flash: function (color, alpha, time) {
+      this.flashColor = color; this.flashAlpha = alpha; this.flashT = time;
+    },
+    updateFx: function (dt) {
+      if (this.shakeT > 0) {
+        this.shakeT -= dt;
+        var f = Math.max(0, this.shakeT);
+        this.shakeX = rand(-1, 1) * this.shakeMag * f;
+        this.shakeY = rand(-1, 1) * this.shakeMag * f;
+        if (this.shakeT <= 0) { this.shakeX = this.shakeY = 0; this.shakeMag = 0; }
+      }
+      if (this.flashT > 0) this.flashT -= dt;
+    },
+
+    begin: function () {
+      var c = this.ctx;
+      c.setTransform(1, 0, 0, 1, 0, 0);
+      c.fillStyle = PAL.void;
+      c.fillRect(0, 0, VIEW_W, VIEW_H);
+      c.translate(Math.round(this.shakeX), Math.round(this.shakeY));
+    },
+    end: function () {
+      var c = this.ctx;
+      c.setTransform(1, 0, 0, 1, 0, 0);
+      if (this.flashT > 0) {
+        c.globalAlpha = clamp(this.flashAlpha * this.flashT * 6, 0, 1);
+        c.fillStyle = this.flashColor;
+        c.fillRect(0, 0, VIEW_W, VIEW_H);
+        c.globalAlpha = 1;
+      }
+    },
+
+    /* primitives */
+    rect: function (x, y, w, h, color) {
+      var c = this.ctx; c.fillStyle = color;
+      c.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h));
+    },
+    rectA: function (x, y, w, h, color, alpha) {
+      var c = this.ctx; c.globalAlpha = alpha; this.rect(x, y, w, h, color); c.globalAlpha = 1;
+    },
+    line: function (x1, y1, x2, y2, color, w) {
+      var c = this.ctx;
+      c.strokeStyle = color; c.lineWidth = w || 1;
+      c.beginPath(); c.moveTo(x1 + 0.5, y1 + 0.5); c.lineTo(x2 + 0.5, y2 + 0.5); c.stroke();
+    },
+    circle: function (x, y, r, color) {
+      var c = this.ctx; c.fillStyle = color;
+      c.beginPath(); c.arc(Math.round(x), Math.round(y), r, 0, Math.PI * 2); c.fill();
+    },
+    ring: function (x, y, r, color, w, alpha) {
+      var c = this.ctx;
+      c.globalAlpha = alpha === undefined ? 1 : alpha;
+      c.strokeStyle = color; c.lineWidth = w || 1;
+      c.beginPath(); c.arc(x, y, Math.max(0.5, r), 0, Math.PI * 2); c.stroke();
+      c.globalAlpha = 1;
+    },
+    /* soft additive bloom — the H.A.R.T. glow */
+    glow: function (x, y, r, color, alpha) {
+      var c = this.ctx;
+      c.save();
+      c.globalCompositeOperation = 'lighter';
+      c.globalAlpha = alpha === undefined ? 0.5 : alpha;
+      var g = c.createRadialGradient(x, y, 0, x, y, r);
+      g.addColorStop(0, color);
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      c.fillStyle = g;
+      c.beginPath(); c.arc(x, y, r, 0, Math.PI * 2); c.fill();
+      c.restore();
+    },
+
+    /* text — chunky monospace, drawn into the low-res buffer so it pixel-scales */
+    text: function (str, x, y, opt) {
+      opt = opt || {};
+      var c = this.ctx;
+      var size = opt.size || 8;
+      c.font = (opt.bold === false ? '' : 'bold ') + size + 'px "Courier New", ui-monospace, monospace';
+      c.textAlign = opt.align || 'left';
+      c.textBaseline = 'top';
+      if (opt.shadow !== false) {
+        c.fillStyle = opt.shadowColor || 'rgba(0,0,0,0.85)';
+        c.fillText(str, Math.round(x) + 1, Math.round(y) + 1);
+      }
+      if (opt.glow) { c.save(); c.shadowColor = opt.glow; c.shadowBlur = 8; }
+      c.fillStyle = opt.color || PAL.white;
+      c.globalAlpha = opt.alpha === undefined ? 1 : opt.alpha;
+      c.fillText(str, Math.round(x), Math.round(y));
+      c.globalAlpha = 1;
+      if (opt.glow) c.restore();
+    },
+    textWidth: function (str, size) {
+      var c = this.ctx;
+      c.font = 'bold ' + (size || 8) + 'px "Courier New", ui-monospace, monospace';
+      return c.measureText(str).width;
+    },
+    /* word-wrap helper for the codex */
+    wrap: function (str, size, maxW) {
+      var words = String(str).split(' '), lines = [], cur = '';
+      for (var i = 0; i < words.length; i++) {
+        var t = cur ? cur + ' ' + words[i] : words[i];
+        if (this.textWidth(t, size) > maxW && cur) { lines.push(cur); cur = words[i]; }
+        else cur = t;
+      }
+      if (cur) lines.push(cur);
+      return lines;
+    }
+  };
+
+  /* ---------- particles ---------- */
+  function Particles() { this.list = []; }
+  Particles.prototype.spawn = function (o) {
+    this.list.push({
+      x: o.x, y: o.y, vx: o.vx || 0, vy: o.vy || 0,
+      life: o.life || 0.5, max: o.life || 0.5,
+      size: o.size || 2, color: o.color || PAL.hart,
+      grav: o.grav === undefined ? 0.1 : o.grav,
+      drag: o.drag === undefined ? 1 : o.drag,
+      glow: !!o.glow, ring: !!o.ring, spin: o.spin || 0
+    });
+  };
+  Particles.prototype.burst = function (x, y, n, o) {
+    o = o || {};
+    for (var i = 0; i < n; i++) {
+      var a = o.angle === undefined ? rand(0, Math.PI * 2) : o.angle + rand(-o.spread || -0.6, o.spread || 0.6);
+      var s = rand(o.smin === undefined ? 0.6 : o.smin, o.smax === undefined ? 3 : o.smax);
+      this.spawn({
+        x: x, y: y, vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+        life: rand(o.lmin || 0.25, o.lmax || 0.7), size: o.size || randInt(1, 3),
+        color: o.color || PAL.hart, grav: o.grav, drag: o.drag, glow: o.glow
+      });
+    }
+  };
+  Particles.prototype.update = function (dt) {
+    for (var i = this.list.length - 1; i >= 0; i--) {
+      var p = this.list[i];
+      p.x += p.vx; p.y += p.vy;
+      p.vy += p.grav; p.vx *= p.drag; p.vy *= p.drag;
+      p.life -= dt;
+      if (p.life <= 0) this.list.splice(i, 1);
+    }
+  };
+  Particles.prototype.draw = function (cam) {
+    for (var i = 0; i < this.list.length; i++) {
+      var p = this.list[i], t = clamp(p.life / p.max, 0, 1);
+      var x = p.x - cam.x, y = p.y - cam.y;
+      if (p.glow) Gfx.glow(x, y, p.size * 3, p.color, 0.35 * t);
+      Gfx.rectA(x - p.size / 2, y - p.size / 2, p.size, p.size, p.color, t);
+    }
+  };
+  Particles.prototype.clear = function () { this.list.length = 0; };
+
+  /* ---------- camera ---------- */
+  function Camera(w, h) {
+    this.x = 0; this.y = 0; this.w = w; this.h = h;
+    this.boundsW = w; this.boundsH = h; this.lockX = false;
+  }
+  Camera.prototype.follow = function (target, snap) {
+    if (this.lockX) return;
+    var tx = clamp(target.x + target.w / 2 - this.w / 2, 0, Math.max(0, this.boundsW - this.w));
+    var ty = clamp(target.y + target.h / 2 - this.h / 2 + 20, 0, Math.max(0, this.boundsH - this.h));
+    if (snap) { this.x = tx; this.y = ty; }
+    else { this.x = lerp(this.x, tx, 0.12); this.y = lerp(this.y, ty, 0.08); }
+  };
+  Camera.prototype.clampX = function () {
+    this.x = clamp(this.x, 0, Math.max(0, this.boundsW - this.w));
+  };
+
+  global.RA = global.RA || {};
+  global.RA.core = {
+    VIEW_W: VIEW_W, VIEW_H: VIEW_H, TILE: TILE,
+    PAL: PAL, Gfx: Gfx, Particles: Particles, Camera: Camera,
+    clamp: clamp, lerp: lerp, approach: approach, rand: rand, randInt: randInt,
+    pick: pick, aabb: aabb, dist: dist
+  };
+})(window);
+
+/* ===== src/engine/input.js ===== */
+/* =============================================================
+   engine/input.js — keyboard + touch, action-mapped
+   ============================================================= */
+(function (global) {
+  'use strict';
+
+  var MAP = {
+    ArrowLeft: 'left', KeyA: 'left',
+    ArrowRight: 'right', KeyD: 'right',
+    ArrowUp: 'up', KeyW: 'up',
+    ArrowDown: 'down', KeyS: 'down',
+    Space: 'jump', KeyZ: 'jump',
+    KeyX: 'hit', KeyJ: 'hit',
+    KeyC: 'blast', KeyK: 'blast',
+    ShiftLeft: 'dash', ShiftRight: 'dash', KeyL: 'dash',
+    KeyH: 'hart',
+    Enter: 'start', NumpadEnter: 'start',
+    Escape: 'pause', KeyP: 'pause',
+    Tab: 'codex',
+    KeyM: 'mute'
+  };
+
+  var Input = {
+    state: {}, last: {}, latch: {}, anyPressed: false, touch: false,
+    buttons: [],
+
+    init: function (canvas) {
+      var self = this;
+      global.addEventListener('keydown', function (e) {
+        var a = MAP[e.code];
+        if (a) {
+          e.preventDefault();
+          self.state[a] = true;
+          if (!e.repeat) self.latch[a] = true;   // latch, so a 1ms tap is never lost
+          self.anyPressed = true;
+        }
+        // free typing for the player-name entry
+        self.lastKey = e.key;
+        self.lastCode = e.code;
+      });
+      global.addEventListener('keyup', function (e) {
+        var a = MAP[e.code];
+        if (a) { e.preventDefault(); self.state[a] = false; }
+      });
+      global.addEventListener('blur', function () { self.state = {}; self.latch = {}; });
+      this.initTouch(canvas);
+      return this;
+    },
+
+    /* on-screen controls appear only if the device reports touch */
+    initTouch: function (canvas) {
+      if (!('ontouchstart' in global) && !navigator.maxTouchPoints) return;
+      this.touch = true;
+      var pad = document.getElementById('touchpad');
+      if (!pad) return;
+      pad.style.display = 'flex';
+      var self = this;
+      var els = pad.querySelectorAll('[data-act]');
+      for (var i = 0; i < els.length; i++) {
+        (function (el) {
+          var act = el.getAttribute('data-act');
+          function on(e) {
+            e.preventDefault();
+            self.state[act] = true; self.latch[act] = true;
+            self.anyPressed = true; el.classList.add('on');
+          }
+          function off(e) { e.preventDefault(); self.state[act] = false; el.classList.remove('on'); }
+          el.addEventListener('touchstart', on, { passive: false });
+          el.addEventListener('touchend', off, { passive: false });
+          el.addEventListener('touchcancel', off, { passive: false });
+          el.addEventListener('mousedown', on);
+          el.addEventListener('mouseup', off);
+          el.addEventListener('mouseleave', off);
+        })(els[i]);
+      }
+    },
+
+    down: function (a) { return !!this.state[a]; },
+    /* consumes the latch: one press == one trigger, however short the tap */
+    pressed: function (a) {
+      if (this.latch[a]) { this.latch[a] = false; return true; }
+      return false;
+    },
+    released: function (a) { return !this.state[a] && !!this.last[a]; },
+    anyStart: function () {
+      return this.pressed('start') || this.pressed('jump') || this.pressed('hit');
+    },
+    endFrame: function () {
+      this.last = {};
+      for (var k in this.state) this.last[k] = this.state[k];
+      this.latch = {};
+      this.anyPressed = false;
+      this.lastKey = null; this.lastCode = null;
+    }
+  };
+
+  global.RA = global.RA || {};
+  global.RA.Input = Input;
+})(window);
+
+/* ===== src/engine/audio.js ===== */
+/* =============================================================
+   engine/audio.js — original chiptune + SFX, pure WebAudio.
+   Melodies are written in a Phrygian-dominant (Bhairav-flavoured)
+   scale: original music, but with an unmistakably filmi colour.
+   Nothing here is sampled or transcribed from the soundtrack.
+   ============================================================= */
+(function (global) {
+  'use strict';
+
+  var SCALE = [0, 1, 4, 5, 7, 8, 11];           // 1 b2 3 4 5 b6 7
+  function deg(d) {                              // scale degree -> semitones
+    var oct = Math.floor(d / 7), i = ((d % 7) + 7) % 7;
+    return SCALE[i] + 12 * oct;
+  }
+  function mtof(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+
+  var A = {
+    ctx: null, master: null, musicGain: null, sfxGain: null,
+    muted: false, track: null, step: 0, nextTime: 0, timer: null, ready: false,
+
+    init: function () {
+      if (this.ctx) return this;
+      var AC = global.AudioContext || global.webkitAudioContext;
+      if (!AC) return this;
+      this.ctx = new AC();
+      this.master = this.ctx.createGain(); this.master.gain.value = 0.9;
+      this.musicGain = this.ctx.createGain(); this.musicGain.gain.value = 0.32;
+      this.sfxGain = this.ctx.createGain(); this.sfxGain.gain.value = 0.42;
+      this.musicGain.connect(this.master); this.sfxGain.connect(this.master);
+      this.master.connect(this.ctx.destination);
+      this.ready = true;
+      return this;
+    },
+    resume: function () {
+      this.init();
+      if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume();
+    },
+    toggleMute: function () {
+      this.muted = !this.muted;
+      if (this.master) this.master.gain.value = this.muted ? 0 : 0.9;
+      return this.muted;
+    },
+
+    /* ---------- voices ---------- */
+    tone: function (freq, t, dur, type, gain, dest, glide) {
+      if (!this.ctx) return;
+      var c = this.ctx, o = c.createOscillator(), g = c.createGain();
+      o.type = type || 'square';
+      o.frequency.setValueAtTime(freq, t);
+      if (glide) o.frequency.exponentialRampToValueAtTime(Math.max(20, glide), t + dur);
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(gain, t + 0.008);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      o.connect(g); g.connect(dest || this.sfxGain);
+      o.start(t); o.stop(t + dur + 0.02);
+    },
+    noise: function (t, dur, gain, freq, q, dest) {
+      if (!this.ctx) return;
+      var c = this.ctx, n = Math.floor(c.sampleRate * dur);
+      if (n <= 0) return;
+      var buf = c.createBuffer(1, n, c.sampleRate), d = buf.getChannelData(0);
+      for (var i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n);
+      var src = c.createBufferSource(); src.buffer = buf;
+      var f = c.createBiquadFilter(); f.type = 'bandpass';
+      f.frequency.value = freq || 2200; f.Q.value = q || 1;
+      var g = c.createGain(); g.gain.value = gain;
+      src.connect(f); f.connect(g); g.connect(dest || this.sfxGain);
+      src.start(t); src.stop(t + dur);
+    },
+
+    /* ---------- SFX ---------- */
+    sfx: function (name) {
+      if (!this.ctx || this.muted) return;
+      var t = this.ctx.currentTime, s = this.sfxGain;
+      switch (name) {
+        case 'jump':    this.tone(300, t, 0.14, 'square', 0.16, s, 620); break;
+        case 'land':    this.noise(t, 0.06, 0.10, 700, 1.2, s); break;
+        case 'punch':   this.tone(180, t, 0.07, 'square', 0.16, s, 90);
+                        this.noise(t, 0.05, 0.10, 1400, 1.4, s); break;
+        case 'hitflesh':this.noise(t, 0.11, 0.16, 900, 0.9, s);
+                        this.tone(120, t, 0.10, 'sawtooth', 0.10, s, 60); break;
+        case 'blast':   this.tone(900, t, 0.16, 'square', 0.13, s, 260);
+                        this.tone(1350, t, 0.10, 'triangle', 0.07, s, 400); break;
+        case 'charge':  this.tone(200, t, 0.5, 'triangle', 0.07, s, 1200); break;
+        case 'dash':    this.noise(t, 0.15, 0.10, 3000, 0.7, s);
+                        this.tone(600, t, 0.12, 'triangle', 0.07, s, 1500); break;
+        case 'hurt':    this.tone(220, t, 0.22, 'sawtooth', 0.18, s, 70);
+                        this.noise(t, 0.16, 0.12, 400, 0.8, s); break;
+        case 'pickup':  this.tone(mtof(84), t, 0.07, 'square', 0.13, s);
+                        this.tone(mtof(91), t + 0.07, 0.10, 'square', 0.13, s); break;
+        case 'codex':   this.tone(mtof(76), t, 0.08, 'triangle', 0.14, s);
+                        this.tone(mtof(83), t + 0.08, 0.08, 'triangle', 0.14, s);
+                        this.tone(mtof(88), t + 0.16, 0.16, 'triangle', 0.14, s); break;
+        case 'menu':    this.tone(700, t, 0.04, 'square', 0.10, s); break;
+        case 'select':  this.tone(520, t, 0.06, 'square', 0.13, s, 900); break;
+        case 'deny':    this.tone(160, t, 0.16, 'square', 0.14, s, 110); break;
+        case 'detach':  this.tone(1400, t, 0.30, 'sine', 0.14, s, 180);
+                        this.noise(t, 0.25, 0.08, 500, 0.6, s); break;
+        case 'attach':  this.tone(180, t, 0.30, 'sine', 0.14, s, 1400); break;
+        case 'shot':    this.tone(1800, t, 0.05, 'square', 0.18, s, 200);
+                        this.noise(t, 0.22, 0.20, 800, 0.5, s); break;
+        case 'explode': this.noise(t, 0.6, 0.28, 300, 0.5, s);
+                        this.tone(140, t, 0.5, 'sawtooth', 0.16, s, 40); break;
+        case 'bossroar':this.tone(90, t, 0.9, 'sawtooth', 0.20, s, 45);
+                        this.noise(t, 0.9, 0.14, 260, 0.4, s); break;
+        case 'levelup': [0, 4, 7, 11, 14].forEach(function (n, i) {
+                          A.tone(mtof(60 + n), t + i * 0.09, 0.22, 'square', 0.13, s);
+                        }); break;
+        case 'gameover':[0, -2, -4, -7].forEach(function (n, i) {
+                          A.tone(mtof(60 + n), t + i * 0.22, 0.4, 'triangle', 0.14, s);
+                        }); break;
+      }
+    },
+
+    /* ---------- music ----------
+       Each track: bpm, root (midi), and 16-step bass / 32-step lead /
+       16-step drum patterns. Steps are 16th notes. */
+    tracks: {
+      title: {
+        bpm: 92, root: 45,
+        bass: [0, null, null, 0, null, null, 2, null, 3, null, null, 3, null, null, 0, null],
+        lead: [7, null, 8, null, 9, null, 8, null, 7, null, null, null, 4, null, null, null,
+               5, null, 4, null, 3, null, 4, null, 2, null, null, null, null, null, null, null],
+        drums: ['.', '.', 'h', '.', 'k', '.', 'h', '.', '.', '.', 'h', '.', 's', '.', 'h', '.'],
+        leadWave: 'triangle'
+      },
+      lvl1: {
+        bpm: 132, root: 45,
+        bass: [0, 0, null, 0, 0, null, 0, null, 3, 3, null, 3, 2, null, 2, null],
+        lead: [7, 9, 8, 7, 5, null, 4, null, 3, 4, 5, null, 4, null, null, null,
+               7, 9, 11, 9, 8, null, 7, null, 5, 4, 3, null, 2, null, 0, null],
+        drums: ['k', '.', 'h', '.', 's', '.', 'h', '.', 'k', 'k', 'h', '.', 's', '.', 'h', 'h'],
+        leadWave: 'square'
+      },
+      lvl2: {
+        bpm: 156, root: 43,
+        bass: [0, 0, 0, null, 0, 0, 0, null, 5, 5, 5, null, 4, 4, 4, null],
+        lead: [11, null, 10, null, 9, null, 8, null, 7, 8, 9, null, 11, null, null, null,
+               12, null, 11, null, 9, null, 8, null, 7, null, 5, null, 4, null, 3, null],
+        drums: ['k', 'h', 'h', 'h', 's', 'h', 'h', 'h', 'k', 'h', 'k', 'h', 's', 'h', 'h', 'h'],
+        leadWave: 'square'
+      },
+      lvl3: {
+        bpm: 144, root: 41,
+        bass: [0, null, 0, 0, null, 0, null, 0, 1, null, 1, 1, null, 1, null, null],
+        lead: [0, null, 3, null, 4, null, 3, null, 2, null, 1, null, 0, null, null, null,
+               4, null, 5, null, 6, null, 5, null, 4, null, 3, null, 2, null, 1, null],
+        drums: ['k', '.', 'h', 'k', 's', '.', 'h', '.', 'k', '.', 'h', 'k', 's', 'h', 's', 'h'],
+        leadWave: 'sawtooth'
+      },
+      boss: {
+        bpm: 158, root: 40,
+        bass: [0, 0, null, 0, 0, null, 1, null, 0, 0, null, 0, 4, null, 3, null],
+        lead: [14, null, 13, null, 11, 10, 9, null, 7, null, 9, 11, null, 10, null, 9,
+               7, null, 6, null, 4, 3, 2, null, 0, null, 2, 3, null, 4, null, null],
+        drums: ['k', 'h', 's', 'h', 'k', 'h', 's', 'h', 'k', 'k', 's', 'h', 'k', 'h', 's', 's'],
+        leadWave: 'square'
+      },
+      ending: {
+        bpm: 80, root: 45,
+        bass: [0, null, null, null, 3, null, null, null, 4, null, null, null, 2, null, null, null],
+        lead: [4, null, null, 5, null, null, 4, null, 2, null, null, null, 0, null, null, null,
+               2, null, null, 3, null, null, 2, null, 0, null, null, null, null, null, null, null],
+        drums: ['.', '.', '.', '.', 'h', '.', '.', '.', '.', '.', '.', '.', 'h', '.', '.', '.'],
+        leadWave: 'triangle'
+      }
+    },
+
+    play: function (name) {
+      this.init();
+      if (!this.ctx) return;
+      if (this.trackName === name) return;
+      this.stop();
+      this.trackName = name;
+      this.track = this.tracks[name];
+      if (!this.track) return;
+      this.step = 0;
+      this.nextTime = this.ctx.currentTime + 0.05;
+      var self = this;
+      this.timer = setInterval(function () { self.schedule(); }, 25);
+    },
+    stop: function () {
+      if (this.timer) { clearInterval(this.timer); this.timer = null; }
+      this.track = null; this.trackName = null;
+    },
+
+    schedule: function () {
+      if (!this.track || !this.ctx) return;
+      var stepDur = 60 / this.track.bpm / 4;
+      var horizon = this.ctx.currentTime + 0.15;
+      while (this.nextTime < horizon) {
+        this.emitStep(this.step, this.nextTime, stepDur);
+        this.nextTime += stepDur;
+        this.step++;
+      }
+    },
+
+    emitStep: function (step, t, sd) {
+      var tr = this.track, g = this.musicGain;
+      var b = tr.bass[step % tr.bass.length];
+      if (b !== null && b !== undefined) {
+        this.tone(mtof(tr.root + deg(b) - 12), t, sd * 2.4, 'triangle', 0.30, g);
+        this.tone(mtof(tr.root + deg(b) - 24), t, sd * 2.0, 'sawtooth', 0.10, g);
+      }
+      var l = tr.lead[step % tr.lead.length];
+      if (l !== null && l !== undefined) {
+        var f = mtof(tr.root + 12 + deg(l));
+        this.tone(f, t, sd * 1.9, tr.leadWave, 0.16, g);
+        this.tone(f * 1.005, t, sd * 1.9, tr.leadWave, 0.07, g);   // detune shimmer
+        this.tone(f * 2, t, sd * 0.9, 'triangle', 0.04, g);        // octave sparkle
+      }
+      var d = tr.drums[step % tr.drums.length];
+      if (d === 'k') { this.tone(150, t, 0.13, 'sine', 0.34, g, 45); }
+      else if (d === 's') { this.noise(t, 0.11, 0.18, 1700, 0.9, g); }
+      else if (d === 'h') { this.noise(t, 0.035, 0.07, 8000, 0.6, g); }
+    }
+  };
+
+  global.RA = global.RA || {};
+  global.RA.Audio = A;
+})(window);
+
+/* ===== src/data/lore.js ===== */
+/* =============================================================
+   data/lore.js — the CODEX.
+   Every entry is a real detail from the 2011 film. Entries marked
+   `shard: true` are locked until you find their Data Shard in a
+   level, so the film unfolds as you play.
+   ============================================================= */
+(function (global) {
+  'use strict';
+
+  var CODEX = [
+    /* ---------------- DOSSIER ---------------- */
+    { cat: 'DOSSIER', title: 'SHEKHAR SUBRAMANIUM',
+      body: 'Game designer at Barron Industries, London. Played by Shah Rukh Khan. A Tamil ' +
+            'father with a long run of commercial flops behind him, given one last chance to ' +
+            'ship a hit. He lends his own face to the hero avatar, G.One. Killed by Ra.One after ' +
+            'claiming to be Lucifer to protect his son.' },
+    { cat: 'DOSSIER', title: 'G.ONE',
+      body: 'The hero avatar. "Good One" — and it sounds like JEEVAN, Hindi for life. Wears ' +
+            'Shekhar\'s face. Superhuman strength and speed, energy projection from the H.A.R.T., ' +
+            'and an adaptive intelligence: he learns by watching. He is deliberately built weaker ' +
+            'than his enemy.' },
+    { cat: 'DOSSIER', title: 'RA.ONE',
+      body: 'RANDOM ACCESS VERSION 1.0. The team kept the name once they noticed it also reads ' +
+            'as RAVAN, the demon king of the Ramayana. Played by Arjun Rampal. Designed faceless ' +
+            'on purpose, because he can be anyone.', shard: true },
+    { cat: 'DOSSIER', title: 'RA.ONE — CAPABILITIES',
+      body: 'Shape-shifting. Mind reading, thought control and brainwashing. Electrical ' +
+            'discharge. Superhuman strength, speed, hearing, stamina, reflexes, memory and ' +
+            'regeneration. Super-intelligence. Every one of them exceeds G.One — by design.', shard: true },
+    { cat: 'DOSSIER', title: 'PRATEEK / "LUCIFER"',
+      body: 'Shekhar\'s son, played by Armaan Verma. He is the one who demands a villain more ' +
+            'powerful than the hero. He logs into the launch build under the handle LUCIFER, ' +
+            'reaches Level 2 — and is interrupted mid-turn. That unfinished turn is the reason ' +
+            'for everything that follows.' },
+    { cat: 'DOSSIER', title: 'SONIA SUBRAMANIUM',
+      body: 'Shekhar\'s wife, played by Kareena Kapoor — a Punjabi married into a Tamil family. ' +
+            'Ra.One hypnotises her, takes her form to abduct Prateek, and puts the real Sonia on ' +
+            'a runaway Mumbai local.' },
+    { cat: 'DOSSIER', title: 'AKASHI',
+      body: 'Played by Tom Wu. Shekhar\'s colleague, who performs the motion capture that gives ' +
+            'the game characters their movement. He interrupts Lucifer\'s turn — and becomes ' +
+            'Ra.One\'s first victim when he cannot say where Lucifer is.', shard: true },
+    { cat: 'DOSSIER', title: 'JENNY NAYAR',
+      body: 'Played by Shahana Goswami. Programs the game, and demonstrates the Barron Industries ' +
+            'technology that lets a digital object cross into the real world over a wireless ' +
+            'transmission. It is her computer G.One walks out of.' },
+    { cat: 'DOSSIER', title: 'BARRON',
+      body: 'Head of Barron Industries, played by Dalip Tahil. The London studio where the game ' +
+            'is built, and where the transfer technology is unveiled.' },
+    { cat: 'DOSSIER', title: 'CHITTI',
+      body: 'Rajinikanth appears as Chitti, the robot from ENTHIRAN / ROBOT, in a cameo mid-brawl. ' +
+            'G.One watches him and adapts — a joke about the hero\'s learning routine, and a ' +
+            'straight tribute.', shard: true },
+
+    /* ---------------- THE GAME ---------------- */
+    { cat: 'THE GAME', title: 'RULE 1 — THREE LEVELS',
+      body: 'The game has exactly three levels. The villain is stronger than the hero at every ' +
+            'one of them, because the designer\'s son asked for it that way.' },
+    { cat: 'THE GAME', title: 'RULE 2 — THE H.A.R.T.',
+      body: 'HERTZ AMPLIFYING RESONANCE TRANSMITTER. The device every player carries; the glowing ' +
+            'core in the chest. It is the source of all their powers.' },
+    { cat: 'THE GAME', title: 'RULE 3 — ESCALATION',
+      body: 'The power of the H.A.R.T. increases with every level. So does everything it is ' +
+            'pointed at.' },
+    { cat: 'THE GAME', title: 'RULE 4 — THE ONE BULLET',
+      body: 'A player can be killed only in the third level, only by the anti-H.A.R.T. gun, and ' +
+            'only while his H.A.R.T. is ATTACHED. The gun holds exactly one bullet. Fire it at a ' +
+            'player whose H.A.R.T. is detached and it is spent forever.', shard: true },
+    { cat: 'THE GAME', title: 'THE TRICK',
+      body: 'G.One and Prateek let Ra.One take his shot — with the H.A.R.T. detached. The single ' +
+            'round passes through a target it cannot kill. Ra.One, disarmed and enraged, splits ' +
+            'into ten copies of himself.', shard: true },
+    { cat: 'THE GAME', title: 'THE SHADOW',
+      body: 'Ten identical Ra.Ones, and no way to tell them apart — until they see it: only the ' +
+            'original casts a shadow. The copies are light with nothing behind them.', shard: true },
+    { cat: 'THE GAME', title: 'THE CROSSING',
+      body: 'Ra.One is not hacked out or summoned. He uses the Barron transfer technology to walk ' +
+            'out of the game over a wireless signal, into the real world, hunting a login name.' },
+
+    /* ---------------- THE FILM ---------------- */
+    { cat: 'THE FILM', title: 'RELEASE',
+      body: 'RA.ONE. Released 26 October 2011, Diwali. Directed by Anubhav Sinha, produced by ' +
+            'Gauri Khan for Red Chillies Entertainment. Hindi, with Tamil and Telugu dubs.' },
+    { cat: 'THE FILM', title: 'THE BUDGET',
+      body: 'Around Rs 150 crore including publicity — roughly US$32 million at the time, and ' +
+            'one of the most expensive Indian films ever made when it released. About a third of ' +
+            'it went on visual effects alone.' },
+    { cat: 'THE FILM', title: 'THE VFX',
+      body: 'Roughly 1,200 artists across 16 studios, coordinated by Red Chillies VFX. The film ' +
+            'took over three years to make and pushed Indian VFX and stereoscopic 3D forward in ' +
+            'one very expensive shove.', shard: true },
+    { cat: 'THE FILM', title: 'THE CAMPAIGN',
+      body: 'About Rs 52 crore on marketing: a nine-month campaign of brand tie-ups, merchandise, ' +
+            'video games and viral marketing. For a generation of Indian kids, Ra.One was ' +
+            'everywhere before it was anywhere.' },
+    { cat: 'THE FILM', title: 'BOX OFFICE',
+      body: 'Over Rs 207 crore. Second highest-grossing Bollywood film of 2011 worldwide, third ' +
+            'domestically, and the holder of several opening-weekend records.' },
+    { cat: 'THE FILM', title: 'LOCATIONS',
+      body: 'Principal photography began March 2010 across India and the United Kingdom. London ' +
+            'for Barron Industries; Mumbai for the second half — including the runaway local and ' +
+            'the wrecking of Chhatrapati Shivaji Terminus.' },
+    { cat: 'THE FILM', title: 'THE 2011 TIE-IN',
+      body: 'RA.ONE: THE GAME, published by Sony Computer Entertainment for PS2 and PS3 around ' +
+            '5 October 2011, developed by Trine Games. A prequel: eleven characters, twenty 3D ' +
+            'arenas, melee combos and ranged weapons, in Story, Brawl and Challenge modes. ' +
+            'This project is not that game — this one is the arcade cabinet it should have had.', shard: true },
+
+    /* ---------------- SOUND ---------------- */
+    { cat: 'SOUND', title: 'VISHAL-SHEKHAR',
+      body: 'Soundtrack by Vishal-Shekhar, released 21 September 2011 by T-Series. Fifteen ' +
+            'tracks. The score is a huge part of why the film stuck.' },
+    { cat: 'SOUND', title: 'CHAMMAK CHALLO',
+      body: 'Akon and Hamsika Iyer. G.One\'s first dance number, performed with deliberately ' +
+            'robotic movement. It is also the sequence where Ra.One finds Prateek, takes Sonia\'s ' +
+            'form, and cuts in.' },
+    { cat: 'SOUND', title: 'CRIMINAL',
+      body: 'Akon, Vishal Dadlani and Shruti Pathak.' },
+    { cat: 'SOUND', title: 'DILDAARA (STAND BY ME)',
+      body: 'Shafqat Amanat Ali, Vishal Dadlani, Shekhar Ravjiani and Clinton Cerejo.' },
+    { cat: 'SOUND', title: 'RAFTAAREIN / BHARE NAINA',
+      body: 'RAFTAAREIN: Vishal Dadlani and Shekhar Ravjiani. BHARE NAINA: the same pair with ' +
+            'Nandini Srikar.' },
+    { cat: 'SOUND', title: 'THIS CABINET\'S MUSIC',
+      body: 'Everything you can hear in LUCIFER PROTOCOL is generated live by the browser — ' +
+            'square, triangle and sawtooth oscillators, plus filtered noise for drums. The ' +
+            'melodies are original, written in a Phrygian-dominant (Bhairav-flavoured) scale. ' +
+            'No audio file is loaded, and nothing from the soundtrack is reproduced.' },
+
+    /* ---------------- CABINET ---------------- */
+    { cat: 'CABINET', title: 'FAN TRIBUTE',
+      body: 'LUCIFER PROTOCOL is an unofficial, non-commercial fan game. No footage, audio, art ' +
+            'or code from the film or its tie-in game is used. Every sprite here is drawn with ' +
+            'rectangles at runtime.' },
+    { cat: 'CABINET', title: 'WHY IT LOOKS LIKE THIS',
+      body: '640x360 internal resolution, integer-scaled, scanlines on top. Not because 2011 ' +
+            'looked like this — because being eleven and standing in front of a cabinet did.' },
+    { cat: 'CABINET', title: 'DATA SHARDS',
+      body: 'Each level hides Data Shards. Every shard you pick up unlocks a locked Codex entry. ' +
+            'They are placed where a curious player goes and a hurrying one does not.' }
+  ];
+
+  /* Story cards — the film's beats, told between levels. */
+  var STORY = {
+    intro: {
+      title: 'BARRON INDUSTRIES / LONDON',
+      lines: [
+        'A designer with nothing but flops behind him is given',
+        'one last chance to ship a hit.',
+        '',
+        'His son sets the brief: THE VILLAIN MUST BE STRONGER',
+        'THAN THE HERO. So he builds one.',
+        '',
+        'Three levels. A H.A.R.T. in every chest.',
+        'And a villain with no face, because he can wear any.'
+      ]
+    },
+    l1: {
+      title: 'LEVEL 1 — THE LAUNCH FLOOR',
+      lines: [
+        'A player logged in as LUCIFER. He reached Level 2.',
+        'Then someone pulled him away mid-turn.',
+        '',
+        'Ra.One does not accept an unfinished turn.',
+        'He has used the transfer signal to walk out of the game,',
+        'and he is asking everyone in this building one question:',
+        '',
+        'WHERE IS LUCIFER?'
+      ]
+    },
+    l2: {
+      title: 'LEVEL 2 — MUMBAI LOCAL',
+      lines: [
+        'Akashi is dead. Shekhar is dead — he said he was Lucifer,',
+        'and the ID scan called the lie.',
+        '',
+        'Ra.One has taken Sonia\'s form and taken the boy.',
+        'The real Sonia is on a local with no brakes,',
+        'running for Chhatrapati Shivaji Terminus.',
+        '',
+        'Get to the front of the train. Nothing else matters.'
+      ]
+    },
+    l3: {
+      title: 'LEVEL 3 — THE THIRD LEVEL',
+      lines: [
+        'This is the only level where a player can die.',
+        '',
+        'The anti-H.A.R.T. gun holds ONE bullet.',
+        'It kills only a player whose H.A.R.T. is ATTACHED.',
+        '',
+        'He is stronger than you. He was always stronger than you.',
+        'You were not built to beat him.',
+        'You were built to outthink him.',
+        '',
+        'PRESS H TO DETACH YOUR H.A.R.T.'
+      ]
+    },
+    win: {
+      title: 'GAME OVER — HIS, NOT YOURS',
+      lines: [
+        'Ten copies. Ten identical shapes. One shadow.',
+        '',
+        'You took the real one, and took his remains,',
+        'and that is what finishes you too.',
+        '',
+        'Tell the boy his father loved him.',
+        'Tell him his father is always with him.',
+        '',
+        'The body goes back to the virtual world.',
+        'The H.A.R.T. stays behind.'
+      ]
+    },
+    epilogue: {
+      title: 'LONDON — SEVERAL MONTHS LATER',
+      lines: [
+        'A boy who is very good with a machine sits down',
+        'in front of one.',
+        '',
+        'The H.A.R.T. is still here. That was always enough.',
+        '',
+        'RESTORING G.ONE ...',
+        '',
+        'PLAYER LUCIFER — PRESS START'
+      ]
+    }
+  };
+
+  global.RA = global.RA || {};
+  global.RA.CODEX = CODEX;
+  global.RA.STORY = STORY;
+})(window);
+
+/* ===== src/game/levels.js ===== */
+/* =============================================================
+   game/levels.js — tile maps, built with a tiny stamping DSL.
+   Legend: '#' solid  '=' one-way platform  '^' hazard
+           'S' start  'C' checkpoint  'B' boss gate
+           'a' sentry 'b' drone 'c' akashi-mask 't' turret
+           'h' H.A.R.T. shard  'R' repair  'd' DATA SHARD
+   ============================================================= */
+(function (global) {
+  'use strict';
+  var C = global.RA.core;
+
+  function grid(w, h) {
+    var g = [];
+    for (var y = 0; y < h; y++) { g.push(new Array(w).fill('.')); }
+    g.w = w; g.h = h;
+    return g;
+  }
+  function put(g, x, y, ch) {
+    if (y >= 0 && y < g.length && x >= 0 && x < g[0].length) g[y][x] = ch;
+  }
+  function row(g, x0, x1, y, ch) { for (var x = x0; x <= x1; x++) put(g, x, y, ch); }
+  function box(g, x0, y0, x1, y1, ch) {
+    for (var y = y0; y <= y1; y++) for (var x = x0; x <= x1; x++) put(g, x, y, ch);
+  }
+  function toStrings(g) {
+    var out = []; for (var y = 0; y < g.length; y++) out.push(g[y].join(''));
+    return out;
+  }
+
+  /* ---------------------------------------------------------
+     LEVEL 1 — BARRON INDUSTRIES, LONDON
+     The launch floor. Teaches movement, melee, blast, dash.
+     --------------------------------------------------------- */
+  function level1() {
+    var W = 152, H = 23, g = grid(W, H);
+    var FLOOR = 19;
+
+    box(g, 0, FLOOR, W - 1, H - 1, '#');       // main floor
+    box(g, 0, 0, 0, H - 1, '#');               // left wall
+
+    put(g, 3, FLOOR - 1, 'S');                 // spawn
+
+    // --- server aisles: raised desks and catwalks
+    row(g, 12, 17, 15, '=');
+    row(g, 22, 27, 13, '=');
+    row(g, 31, 36, 16, '=');
+    put(g, 34, 12, 'd');                       // shard: reachable off the catwalk
+    row(g, 33, 37, 10, '=');
+
+    // --- first pit: the atrium
+    box(g, 42, FLOOR, 47, H - 1, '.');
+    row(g, 42, 47, H - 1, '^');
+    row(g, 43, 46, 15, '=');
+
+    box(g, 52, FLOOR - 3, 55, FLOOR - 1, '#'); // crate stack
+    row(g, 58, 63, 14, '=');
+    row(g, 66, 70, 11, '=');
+    put(g, 68, 10, 'h');
+
+    // --- conference stage where Jenny demos the transfer tech
+    box(g, 74, FLOOR - 2, 88, FLOOR - 1, '#');
+    row(g, 78, 84, 13, '=');
+    put(g, 81, 12, 'R');
+
+    // --- second pit
+    box(g, 92, FLOOR, 98, H - 1, '.');
+    row(g, 92, 98, H - 1, '^');
+    row(g, 92, 94, 16, '=');
+    row(g, 96, 98, 13, '=');
+    put(g, 97, 12, 'd');
+
+    row(g, 103, 108, 15, '=');
+    box(g, 110, FLOOR - 4, 113, FLOOR - 1, '#');
+    row(g, 116, 121, 12, '=');
+    put(g, 119, 11, 'h');
+    put(g, 117, 11, 'd');
+
+    put(g, 100, FLOOR - 1, 'C');               // checkpoint
+
+    // --- enemies
+    ['a:16:18', 'a:26:18', 'b:24:8', 'a:35:15', 'b:45:9', 't:56:18',
+     'a:60:13', 'b:64:8', 'c:80:16', 'a:85:16', 'b:90:9', 't:104:14',
+     'a:106:18', 'c:112:14', 'b:118:8', 'a:120:18', 'c:124:18'
+    ].forEach(function (s) { var p = s.split(':'); put(g, +p[1], +p[2], p[0]); });
+
+    // --- pickups
+    [[20, 17], [30, 12], [50, 18], [62, 13], [76, 18], [102, 14], [115, 18]]
+      .forEach(function (p) { put(g, p[0], p[1], 'h'); });
+    put(g, 88, 15, 'R');
+
+    // --- boss arena
+    put(g, 128, FLOOR - 1, 'B');
+    box(g, 130, 0, 130, FLOOR - 1, '.');
+    box(g, W - 1, 0, W - 1, H - 1, '#');
+    row(g, 134, 138, 13, '=');
+    row(g, 143, 147, 13, '=');
+
+    return {
+      id: 1,
+      name: 'LEVEL 1',
+      place: 'BARRON INDUSTRIES / LONDON',
+      map: toStrings(g),
+      music: 'lvl1',
+      bg: 'london',
+      boss: 'ra1',
+      bossX: 144, arenaX: 129,
+      hartMax: 100,
+      story: 'l1'
+    };
+  }
+
+  /* ---------------------------------------------------------
+     LEVEL 2 — THE RUNAWAY LOCAL, HEADING FOR CST
+     Auto-scrolling. Coach roofs with gaps; overhead gantries
+     punish blind jumps. Fall between coaches and you are gone.
+     --------------------------------------------------------- */
+  function level2() {
+    var W = 196, H = 23, g = grid(W, H);
+    var ROOF = 16;
+
+    // platform we start on, then the train
+    box(g, 0, ROOF, 10, H - 1, '#');
+    put(g, 3, ROOF - 1, 'S');
+    box(g, 0, 0, 0, H - 1, '#');
+
+    var x = 12, coach = 0;
+    while (x < W - 30) {
+      var len = 15 + (coach % 3) * 3;
+      box(g, x, ROOF, x + len, H - 1, '#');            // coach body
+      // roof furniture
+      if (coach % 2 === 0) box(g, x + 4, ROOF - 2, x + 6, ROOF - 1, '#');
+      if (coach % 3 === 2) row(g, x + 7, x + 11, ROOF - 5, '=');
+      // overhead gantry — at exactly the height of a full jump.
+      // on this stretch of track you stay on your feet.
+      if (coach % 2 === 1) row(g, x + 13, x + 15, ROOF - 4, '^');
+      // live third-rail arcing across the gap
+      if (coach % 4 === 2) put(g, x + len, ROOF - 1, '^');
+
+      // enemies riding the roof
+      put(g, x + 3, ROOF - 1, coach % 3 === 0 ? 'a' : 'c');
+      if (coach % 2 === 0) put(g, x + 11, ROOF - 9, 'b');
+      if (coach % 3 === 2) put(g, x + 13, ROOF - 1, 't');
+
+      // pickups & shards
+      if (coach % 2 === 1) put(g, x + 7, ROOF - 1, 'h');
+      if (coach === 1) put(g, x + 5, ROOF - 5, 'd');
+      if (coach === 3) put(g, x + 10, ROOF - 5, 'd');
+      if (coach === 7) put(g, x + 9, ROOF - 5, 'd');
+      if (coach === 5) put(g, x + 6, ROOF - 1, 'R');
+      if (coach === 4 || coach === 8) put(g, x + 2, ROOF - 1, 'C');
+
+      x += len + 3 + (coach % 2);                       // the gap between coaches
+      coach++;
+    }
+
+    // the engine: boss arena
+    var ex = W - 28;
+    box(g, ex, ROOF, W - 1, H - 1, '#');
+    box(g, ex + 6, ROOF - 3, ex + 9, ROOF - 1, '#');
+    put(g, ex - 1, ROOF - 1, 'B');
+    row(g, ex + 12, ex + 16, ROOF - 5, '=');
+    box(g, W - 1, 0, W - 1, H - 1, '#');
+
+    return {
+      id: 2,
+      name: 'LEVEL 2',
+      place: 'MUMBAI LOCAL / INBOUND TO CST',
+      map: toStrings(g),
+      music: 'lvl2',
+      bg: 'mumbai',
+      boss: 'ra2',
+      bossX: W - 12, arenaX: ex,
+      autoScroll: 1.15,
+      timer: 100,
+      hartMax: 130,
+      story: 'l2'
+    };
+  }
+
+  /* ---------------------------------------------------------
+     LEVEL 3 — THE THIRD LEVEL
+     One arena. The only level where a player can die.
+     --------------------------------------------------------- */
+  function level3() {
+    var W = 46, H = 23, g = grid(W, H);
+    var FLOOR = 19;
+    box(g, 0, FLOOR, W - 1, H - 1, '#');
+    box(g, 0, 0, 0, H - 1, '#');
+    box(g, W - 1, 0, W - 1, H - 1, '#');
+    put(g, 4, FLOOR - 1, 'S');
+
+    row(g, 5, 10, 15, '=');
+    row(g, 18, 27, 12, '=');
+    row(g, 35, 40, 15, '=');
+    row(g, 12, 16, 9, '=');
+    row(g, 29, 33, 9, '=');
+
+    put(g, 22, FLOOR - 1, 'B');
+
+    return {
+      id: 3,
+      name: 'LEVEL 3',
+      place: 'THE THIRD LEVEL',
+      map: toStrings(g),
+      music: 'lvl3',
+      bg: 'grid',
+      boss: 'ra3',
+      bossX: 34, arenaX: 1,
+      hartMax: 160,
+      story: 'l3'
+    };
+  }
+
+  global.RA.LEVELS = [level1(), level2(), level3()];
+})(window);
+
+/* ===== src/game/entities.js ===== */
+/* =============================================================
+   game/entities.js — world collision, G.One, enemies, projectiles
+   ============================================================= */
+(function (global) {
+  'use strict';
+  var C = global.RA.core, Gfx = C.Gfx, PAL = C.PAL, T = C.TILE;
+  var Audio = global.RA.Audio;
+
+  var SOLID = { '#': 1 }, ONEWAY = { '=': 1 }, HAZARD = { '^': 1 };
+
+  /* ================= WORLD ================= */
+  function World(level, game) {
+    this.level = level;
+    this.game = game;
+    this.map = level.map.slice();
+    this.h = this.map.length;
+    this.w = this.map[0].length;
+    this.pxW = this.w * T; this.pxH = this.h * T;
+    this.tiles = [];
+    for (var y = 0; y < this.h; y++) this.tiles.push(this.map[y].split(''));
+
+    this.actors = [];
+    this.shots = [];
+    this.pickups = [];
+    this.parts = new C.Particles();
+    this.cam = new C.Camera(C.VIEW_W, C.VIEW_H);
+    this.cam.boundsW = this.pxW; this.cam.boundsH = this.pxH;
+    this.spawnX = 32; this.spawnY = 32;
+    this.checkpoints = [];
+    this.bossGateX = (level.arenaX || 0) * T;
+    this.bossSpawnX = (level.bossX || 0) * T;
+    this.time = 0;
+    this.scanEntities();
+  }
+
+  World.prototype.scanEntities = function () {
+    for (var y = 0; y < this.h; y++) {
+      for (var x = 0; x < this.w; x++) {
+        var ch = this.tiles[y][x], px = x * T, py = y * T;
+        switch (ch) {
+          case 'S': this.spawnX = px; this.spawnY = py - 8; this.tiles[y][x] = '.'; break;
+          case 'C': this.checkpoints.push({ x: px, y: py }); this.tiles[y][x] = '.'; break;
+          case 'B': this.tiles[y][x] = '.'; break;
+          case 'a': this.actors.push(new Sentry(px, py)); this.tiles[y][x] = '.'; break;
+          case 'b': this.actors.push(new Drone(px, py)); this.tiles[y][x] = '.'; break;
+          case 'c': this.actors.push(new Mask(px, py)); this.tiles[y][x] = '.'; break;
+          case 't': this.actors.push(new Turret(px, py)); this.tiles[y][x] = '.'; break;
+          case 'h': this.pickups.push(new Pickup(px, py, 'hart')); this.tiles[y][x] = '.'; break;
+          case 'R': this.pickups.push(new Pickup(px, py, 'repair')); this.tiles[y][x] = '.'; break;
+          case 'd': this.pickups.push(new Pickup(px, py, 'data')); this.tiles[y][x] = '.'; break;
+        }
+      }
+    }
+  };
+
+  World.prototype.tileAt = function (tx, ty) {
+    if (ty < 0 || ty >= this.h || tx < 0 || tx >= this.w) return tx < 0 || tx >= this.w ? '#' : '.';
+    return this.tiles[ty][tx];
+  };
+  World.prototype.isSolid = function (tx, ty) { return !!SOLID[this.tileAt(tx, ty)]; };
+  World.prototype.isOneWay = function (tx, ty) { return !!ONEWAY[this.tileAt(tx, ty)]; };
+  World.prototype.isHazard = function (tx, ty) { return !!HAZARD[this.tileAt(tx, ty)]; };
+
+  World.prototype.solidRect = function (r) {
+    var x0 = Math.floor(r.x / T), x1 = Math.floor((r.x + r.w - 1) / T);
+    var y0 = Math.floor(r.y / T), y1 = Math.floor((r.y + r.h - 1) / T);
+    for (var y = y0; y <= y1; y++) for (var x = x0; x <= x1; x++) if (this.isSolid(x, y)) return true;
+    return false;
+  };
+  World.prototype.hazardRect = function (r) {
+    var x0 = Math.floor(r.x / T), x1 = Math.floor((r.x + r.w - 1) / T);
+    var y0 = Math.floor(r.y / T), y1 = Math.floor((r.y + r.h - 1) / T);
+    for (var y = y0; y <= y1; y++) for (var x = x0; x <= x1; x++) if (this.isHazard(x, y)) return true;
+    return false;
+  };
+
+  /* axis-separated tile collision, with one-way platforms */
+  World.prototype.move = function (a, dx, dy) {
+    var i, steps;
+    // X
+    if (dx) {
+      steps = Math.ceil(Math.abs(dx) / 4) || 1;
+      for (i = 0; i < steps; i++) {
+        var sx = dx / steps;
+        a.x += sx;
+        if (this.solidRect(a)) {
+          a.x -= sx;
+          var tx = sx > 0 ? Math.floor((a.x + a.w) / T) : Math.floor(a.x / T) - 1;
+          a.x = sx > 0 ? tx * T - a.w - 0.01 : (tx + 1) * T + 0.01;
+          a.vx = 0; a.hitWall = true;
+          break;
+        }
+      }
+    }
+    // Y
+    if (dy) {
+      steps = Math.ceil(Math.abs(dy) / 4) || 1;
+      for (i = 0; i < steps; i++) {
+        var sy = dy / steps, prevBottom = a.y + a.h;
+        a.y += sy;
+        var blocked = this.solidRect(a);
+        if (!blocked && sy > 0 && !a.dropThrough) blocked = this.oneWayHit(a, prevBottom);
+        if (blocked) {
+          a.y -= sy;
+          if (sy > 0) {
+            var ty = Math.floor((a.y + a.h) / T);
+            a.y = ty * T - a.h - 0.01;
+            a.onGround = true;
+          } else {
+            a.y = (Math.floor(a.y / T) + 1) * T + 0.01;
+          }
+          a.vy = 0;
+          break;
+        }
+      }
+    }
+  };
+  World.prototype.oneWayHit = function (a, prevBottom) {
+    var x0 = Math.floor(a.x / T), x1 = Math.floor((a.x + a.w - 1) / T);
+    var ty = Math.floor((a.y + a.h - 1) / T);
+    for (var x = x0; x <= x1; x++) {
+      if (this.isOneWay(x, ty) && prevBottom <= ty * T + 2) return true;
+    }
+    return false;
+  };
+
+  World.prototype.spawnShot = function (o) { this.shots.push(new Shot(o)); };
+
+  /* ================= ACTOR BASE ================= */
+  function Actor(x, y, w, h) {
+    this.x = x; this.y = y; this.w = w; this.h = h;
+    this.vx = 0; this.vy = 0; this.face = 1;
+    this.onGround = false; this.dead = false; this.remove = false;
+    this.hurtT = 0; this.anim = 0; this.hp = 1; this.maxhp = 1;
+    this.score = 100; this.hostile = true; this.type = 'actor';
+  }
+  Actor.prototype.cx = function () { return this.x + this.w / 2; };
+  Actor.prototype.cy = function () { return this.y + this.h / 2; };
+  Actor.prototype.damage = function (n, world, kx) {
+    if (this.dead || this.invuln > 0) return false;
+    this.hp -= n; this.hurtT = 0.18;
+    if (kx) this.vx = kx * 2.4;
+    world.parts.burst(this.cx(), this.cy(), 8, { color: PAL.hartGlow, glow: true, lmax: 0.4 });
+    if (this.hp <= 0) { this.die(world); return true; }
+    Audio.sfx('hitflesh');
+    return true;
+  };
+  Actor.prototype.die = function (world) {
+    this.dead = true; this.remove = true;
+    world.parts.burst(this.cx(), this.cy(), 24, { color: PAL.raSeam, glow: true, smax: 4, lmax: 0.9 });
+    world.parts.burst(this.cx(), this.cy(), 12, { color: PAL.raRed, smax: 3, lmax: 0.6 });
+    Audio.sfx('explode');
+    Gfx.shake(2, 0.15);
+    if (world.game) world.game.addScore(this.score);
+  };
+
+  /* ================= SPRITE DRAWING =================
+     Everything is drawn from rectangles at runtime. No image assets. */
+  function figure(sx, sy, o) {
+    // o: {w,h,face,phase,state,suit,trim,glow,eye,core,alpha,shadow}
+    var w = o.w || 14, h = o.h || 24, f = o.face || 1;
+    var ph = o.phase || 0, st = o.state || 'idle';
+    var c = Gfx.ctx;
+    if (o.alpha !== undefined) c.globalAlpha = o.alpha;
+
+    var bob = st === 'run' ? Math.round(Math.sin(ph * 2) * 1) : (st === 'idle' ? Math.round(Math.sin(ph * 0.6)) : 0);
+    var top = sy + bob;
+    var headH = Math.round(h * 0.26), torsoH = Math.round(h * 0.40), legH = h - headH - torsoH;
+    var bodyW = Math.round(w * 0.62), bx = sx + Math.round((w - bodyW) / 2);
+
+    // legs
+    var swing = st === 'run' ? Math.sin(ph * 2) * (w * 0.22)
+              : (st === 'jump' ? -w * 0.12 : (st === 'fall' ? w * 0.10 : 0));
+    var legW = Math.max(3, Math.round(bodyW * 0.38));
+    Gfx.rect(bx + swing, top + headH + torsoH, legW, legH, o.suit);
+    Gfx.rect(bx + bodyW - legW - swing, top + headH + torsoH, legW, legH, o.suit);
+    Gfx.rect(bx + swing, top + h - 2, legW, 2, o.trim);
+    Gfx.rect(bx + bodyW - legW - swing, top + h - 2, legW, 2, o.trim);
+
+    // torso
+    Gfx.rect(bx, top + headH, bodyW, torsoH, o.suit);
+    // suit seams
+    Gfx.rect(bx + 1, top + headH + 1, 1, torsoH - 2, o.trim);
+    Gfx.rect(bx + bodyW - 2, top + headH + 1, 1, torsoH - 2, o.trim);
+    Gfx.rect(bx, top + headH + torsoH - 2, bodyW, 1, o.trim);
+
+    // arms
+    var aSwing = st === 'run' ? -Math.sin(ph * 2) * (w * 0.20) : 0;
+    var armW = Math.max(2, Math.round(bodyW * 0.28));
+    if (st === 'attack') {
+      var reach = Math.round(w * (o.punchExt || 0.55));
+      Gfx.rect(f > 0 ? bx + bodyW : bx - reach, top + headH + 3, reach, armW, o.suit);
+      Gfx.rect(f > 0 ? bx + bodyW + reach - 2 : bx - reach, top + headH + 2, 2, armW + 2, o.trim);
+    } else {
+      Gfx.rect(bx - armW + 1 + aSwing, top + headH + 2, armW, Math.round(torsoH * 0.7), o.suit);
+      Gfx.rect(bx + bodyW - 1 - aSwing, top + headH + 2, armW, Math.round(torsoH * 0.7), o.suit);
+    }
+
+    // head
+    var hw = Math.round(w * 0.5), hx = sx + Math.round((w - hw) / 2);
+    Gfx.rect(hx, top, hw, headH, o.suit);
+    if (o.eye) {
+      var ey = top + Math.round(headH * 0.42);
+      Gfx.rect(f > 0 ? hx + hw - 3 : hx + 1, ey, 2, 2, o.eye);
+      if (o.visor) Gfx.rect(hx, ey, hw, 1, o.eye);
+    }
+    if (o.faceless) {
+      Gfx.rect(hx, top + 1, hw, headH - 2, o.suit);
+      Gfx.rect(hx + 1, top + Math.round(headH * 0.4), hw - 2, 1, o.trim);
+    }
+
+    // the H.A.R.T. core
+    if (o.core) {
+      var ccx = bx + bodyW / 2, ccy = top + headH + Math.round(torsoH * 0.38);
+      var pulse = 0.6 + 0.4 * Math.sin(ph * 3);
+      Gfx.glow(ccx, ccy, 9 + pulse * 4, o.glow, 0.5 * o.coreLevel);
+      Gfx.rect(ccx - 2, ccy - 2, 4, 4, o.glow);
+      Gfx.rect(ccx - 1, ccy - 3, 2, 6, o.glow);
+      Gfx.rect(ccx - 3, ccy - 1, 6, 2, o.glow);
+    }
+    if (o.alpha !== undefined) c.globalAlpha = 1;
+  }
+
+  /* ================= PLAYER — G.ONE ================= */
+  function Player(x, y, game) {
+    Actor.call(this, x, y, 12, 24);
+    this.type = 'player';
+    this.game = game;
+    this.maxhp = 100; this.hp = 100;
+    this.hartMax = 100; this.hart = 100;
+    this.invuln = 0; this.attackT = 0; this.combo = 0; this.comboT = 0;
+    this.blastCd = 0; this.charge = 0; this.dashT = 0; this.dashCd = 0;
+    this.coyote = 0; this.jumpBuf = 0; this.airJumps = 0;
+    this.hartDetached = false; this.hartObj = null;
+    this.state = 'idle'; this.hitBox = null; this.dead = false;
+    this.invertT = 0; this.lastAttackKind = null;
+    this.deathT = 0; this.spawnFlash = 1.2;
+  }
+  Player.prototype = Object.create(Actor.prototype);
+  Player.prototype.constructor = Player;
+
+  Player.prototype.speed = function () { return this.hartDetached ? 2.0 : 2.5; };
+
+  Player.prototype.update = function (dt, world, input, allowControl) {
+    var G = 0.46, ph = this;
+    this.anim += dt * (Math.abs(this.vx) > 0.4 ? 14 : 5);
+    if (this.hurtT > 0) this.hurtT -= dt;
+    if (this.invuln > 0) this.invuln -= dt;
+    if (this.blastCd > 0) this.blastCd -= dt;
+    if (this.dashCd > 0) this.dashCd -= dt;
+    if (this.comboT > 0) { this.comboT -= dt; if (this.comboT <= 0) this.combo = 0; }
+    if (this.spawnFlash > 0) this.spawnFlash -= dt;
+    if (this.invertT > 0) this.invertT -= dt;   // he is reading your inputs
+
+    if (this.dead) {
+      this.deathT += dt;
+      this.vy += G; this.vx *= 0.9;
+      world.move(this, this.vx, this.vy);
+      return;
+    }
+
+    // ----- H.A.R.T. economy -----
+    if (this.hartDetached) {
+      this.hp -= 3 * dt;                                   // running on residual charge
+      if (this.hp <= 1) { this.hp = 1; }
+    } else {
+      this.hart = Math.min(this.hartMax, this.hart + 9 * dt);
+    }
+
+    var ctl = allowControl !== false;
+    var left = ctl && input.down('left'), right = ctl && input.down('right');
+    if (this.invertT > 0) { var swap = left; left = right; right = swap; }
+
+    // ----- dash -----
+    if (this.dashT > 0) {
+      this.dashT -= dt;
+      this.vx = this.face * 6.4;
+      this.invuln = Math.max(this.invuln, 0.05);
+      world.parts.spawn({ x: this.cx(), y: this.cy(), vx: -this.face * 0.6, vy: 0,
+        life: 0.28, size: 3, color: PAL.hart, glow: true, grav: 0 });
+    } else {
+      var acc = this.onGround ? 0.55 : 0.32, spd = this.speed();
+      if (left && !right) { this.vx = C.approach(this.vx, -spd, acc); this.face = -1; }
+      else if (right && !left) { this.vx = C.approach(this.vx, spd, acc); this.face = 1; }
+      else this.vx = C.approach(this.vx, 0, this.onGround ? 0.5 : 0.14);
+    }
+
+    if (ctl && input.pressed('dash') && this.dashCd <= 0 && !this.hartDetached) {
+      this.dashT = 0.17; this.dashCd = 0.55; Audio.sfx('dash');
+      world.parts.burst(this.cx(), this.cy(), 8, { color: PAL.hartGlow, glow: true, smax: 2 });
+    }
+
+    // ----- jump -----
+    if (this.onGround) { this.coyote = 0.11; this.airJumps = 1; }
+    else if (this.coyote > 0) this.coyote -= dt;
+    if (ctl && input.pressed('jump')) this.jumpBuf = 0.12;
+    if (this.jumpBuf > 0) this.jumpBuf -= dt;
+
+    if (this.jumpBuf > 0 && (this.coyote > 0 || this.airJumps > 0)) {
+      if (this.coyote <= 0) {
+        this.airJumps--;
+        world.parts.burst(this.cx(), this.y + this.h, 10,
+          { color: PAL.hart, glow: true, angle: Math.PI / 2, spread: 1.0, smax: 2 });
+      }
+      this.vy = -8.0; this.jumpBuf = 0; this.coyote = 0; this.onGround = false;
+      Audio.sfx('jump');
+    }
+    if (!input.down('jump') && this.vy < -3.0) this.vy = -3.0;      // variable height
+    this.dropThrough = ctl && input.down('down') && input.down('jump');
+
+    // ----- melee -----
+    if (this.attackT > 0) {
+      this.attackT -= dt;
+      if (this.attackT <= 0) this.hitBox = null;
+    } else if (ctl && input.pressed('hit')) {
+      this.attackT = 0.22;
+      this.combo = Math.min(3, this.combo + 1); this.comboT = 0.55;
+      var reach = 20 + this.combo * 2;
+      this.hitBox = { x: this.face > 0 ? this.x + this.w - 2 : this.x - reach + 2,
+                      y: this.y + 4, w: reach, h: 16,
+                      dmg: (this.hartDetached ? 5 : 9) + this.combo * 2, hit: [] };
+      Audio.sfx('punch');
+      this.lastAttackKind = 'melee';
+      if (!this.onGround) this.vy = Math.min(this.vy, 1.0);
+    }
+
+    // ----- H.A.R.T. blast (tap) / charged beam (hold) -----
+    if (ctl && input.down('blast') && !this.hartDetached) {
+      this.charge += dt;
+      if (this.charge > 0.55 && Math.random() < 0.5) {
+        world.parts.spawn({ x: this.x + (this.face > 0 ? this.w + 4 : -4), y: this.cy(),
+          vx: C.rand(-.4, .4), vy: C.rand(-.4, .4), life: 0.3, size: 2, color: PAL.hartGlow, glow: true, grav: 0 });
+      }
+      if (this.charge > 0.55 && this.charge < 0.6) Audio.sfx('charge');
+    } else if (this.charge > 0) {
+      var charged = this.charge > 0.55;
+      var cost = charged ? 40 : 14;
+      if (!this.hartDetached && this.hart >= cost && this.blastCd <= 0) {
+        this.hart -= cost;
+        this.blastCd = charged ? 0.5 : 0.22;
+        world.spawnShot({
+          x: this.x + (this.face > 0 ? this.w : -6), y: this.y + 9,
+          vx: this.face * (charged ? 9 : 7), vy: 0,
+          w: charged ? 14 : 8, h: charged ? 8 : 5,
+          dmg: charged ? 26 : 9, owner: 'player',
+          color: charged ? PAL.hartGlow : PAL.hart, pierce: charged, life: 1.6, big: charged
+        });
+        Audio.sfx('blast');
+        this.lastAttackKind = 'blast';
+        this.vx -= this.face * (charged ? 1.6 : 0.4);
+        if (charged) Gfx.shake(2, 0.12);
+      } else if (this.hart < cost) Audio.sfx('deny');
+      this.charge = 0;
+    }
+
+    // ----- detach / re-attach the H.A.R.T. -----
+    if (ctl && input.pressed('hart') && this.game.canDetach) this.toggleHart(world);
+
+    // ----- integrate -----
+    this.vy = Math.min(this.vy + G, 13);
+    this.onGround = false;
+    world.move(this, this.vx, this.vy);
+
+    if (this.hazardTouch(world)) this.hurt(12, world, -this.face);
+    if (this.y > world.pxH + 40) this.hurt(9999, world, 0);
+
+    this.state = this.attackT > 0 ? 'attack'
+               : (!this.onGround ? (this.vy < 0 ? 'jump' : 'fall')
+               : (Math.abs(this.vx) > 0.5 ? 'run' : 'idle'));
+  };
+
+  Player.prototype.hazardTouch = function (world) {
+    return world.hazardRect({ x: this.x + 2, y: this.y + 2, w: this.w - 4, h: this.h - 4 });
+  };
+
+  Player.prototype.toggleHart = function (world) {
+    if (!this.hartDetached) {
+      this.hartDetached = true;
+      this.hartObj = { x: this.cx(), y: this.cy(), vx: -this.face * 1.6, vy: -2.2, t: 0 };
+      Audio.sfx('detach');
+      Gfx.flash(PAL.hart, 0.35, 0.2);
+      world.parts.burst(this.cx(), this.cy(), 22, { color: PAL.hartGlow, glow: true, smax: 3.4 });
+    } else if (this.hartObj && C.dist(this.cx(), this.cy(), this.hartObj.x, this.hartObj.y) < 28) {
+      this.hartDetached = false; this.hartObj = null;
+      Audio.sfx('attach');
+      world.parts.burst(this.cx(), this.cy(), 18, { color: PAL.hart, glow: true, smax: 3 });
+    } else Audio.sfx('deny');
+  };
+
+  Player.prototype.hurt = function (n, world, kx) {
+    if (this.invuln > 0 || this.dead) return false;
+    this.hp -= n; this.invuln = 1.0; this.hurtT = 0.3;
+    this.vx = (kx || -this.face) * 3.2; this.vy = -3.0;
+    this.combo = 0;
+    Audio.sfx('hurt'); Gfx.shake(3, 0.2); Gfx.flash(PAL.raRed, 0.25, 0.18);
+    world.parts.burst(this.cx(), this.cy(), 14, { color: PAL.raRed, glow: true, smax: 3 });
+    if (this.hp <= 0) { this.hp = 0; this.kill(world); }
+    return true;
+  };
+  Player.prototype.kill = function (world) {
+    if (this.dead) return;
+    this.dead = true; this.deathT = 0; this.vy = -5; this.vx = -this.face * 2;
+    Audio.sfx('gameover'); Gfx.shake(5, 0.5);
+    world.parts.burst(this.cx(), this.cy(), 40, { color: PAL.hart, glow: true, smax: 4, lmax: 1.2 });
+  };
+
+  Player.prototype.draw = function (cam) {
+    var x = Math.round(this.x - cam.x), y = Math.round(this.y - cam.y);
+    if (this.dead) {
+      // dissolve into fragments — the way he goes at the end
+      var t = Math.min(1, this.deathT / 1.2);
+      for (var i = 0; i < 16; i++) {
+        var a = i * 1.7 + this.deathT * 2;
+        Gfx.rectA(x + 6 + Math.cos(a) * t * 24, y + 12 + Math.sin(a) * t * 22, 3, 3, PAL.ra, 1 - t);
+      }
+      Gfx.glow(x + 6, y + 12, 16 * (1 - t), PAL.hart, 0.5 * (1 - t));
+      return;
+    }
+    if (this.invuln > 0 && Math.floor(this.invuln * 20) % 2 === 0) return;   // i-frame blink
+
+    // ground shadow
+    Gfx.rectA(x + 1, this.groundY(cam), this.w - 2, 2, '#000', 0.35);
+
+    figure(x - 1, y, {
+      w: 14, h: 24, face: this.face, phase: this.anim, state: this.state,
+      suit: this.hurtT > 0 ? PAL.white : PAL.bone,
+      trim: this.hartDetached ? PAL.steelLite : PAL.hart,
+      glow: PAL.hart, eye: PAL.hart, visor: true,
+      core: !this.hartDetached, coreLevel: C.clamp(this.hart / this.hartMax, 0.15, 1),
+      punchExt: 0.5 + this.combo * 0.08
+    });
+
+    if (this.charge > 0.55) {
+      var cxp = x + (this.face > 0 ? 18 : -4);
+      Gfx.glow(cxp, y + 11, 10 + Math.sin(this.anim * 4) * 3, PAL.hartGlow, 0.7);
+    }
+    if (this.dashT > 0) Gfx.glow(x + 6, y + 12, 18, PAL.hart, 0.35);
+  };
+  Player.prototype.groundY = function (cam) { return Math.round(this.y + this.h - cam.y - 1); };
+
+  /* the detached H.A.R.T., lying on the floor being important */
+  Player.prototype.drawHart = function (cam, world) {
+    if (!this.hartObj) return;
+    var o = this.hartObj;
+    var x = Math.round(o.x - cam.x), y = Math.round(o.y - cam.y);
+    var p = 0.6 + 0.4 * Math.sin(o.t * 5);
+    Gfx.glow(x, y, 14 + p * 8, PAL.hart, 0.55);
+    Gfx.rect(x - 3, y - 3, 6, 6, PAL.hartGlow);
+    Gfx.rect(x - 1, y - 6, 2, 12, PAL.hart);
+    Gfx.rect(x - 6, y - 1, 12, 2, PAL.hart);
+    Gfx.ring(x, y, 10 + p * 4, PAL.hart, 1, 0.5);
+  };
+  Player.prototype.updateHart = function (dt, world) {
+    var o = this.hartObj; if (!o) return;
+    o.t += dt;
+    o.vy += 0.4; o.x += o.vx; o.y += o.vy; o.vx *= 0.96;
+    var r = { x: o.x - 3, y: o.y - 3, w: 6, h: 6 };
+    if (world.solidRect(r)) { o.y -= o.vy; o.vy = 0; o.vx *= 0.6; }
+    if (Math.random() < 0.3) {
+      world.parts.spawn({ x: o.x, y: o.y, vx: C.rand(-.3, .3), vy: C.rand(-.6, -.1),
+        life: 0.5, size: 2, color: PAL.hart, glow: true, grav: 0 });
+    }
+  };
+
+  /* ================= SHOTS ================= */
+  function Shot(o) {
+    this.x = o.x; this.y = o.y; this.w = o.w || 6; this.h = o.h || 4;
+    this.vx = o.vx || 0; this.vy = o.vy || 0;
+    this.dmg = o.dmg || 6; this.owner = o.owner || 'enemy';
+    this.color = o.color || PAL.raRed; this.life = o.life || 2;
+    this.pierce = !!o.pierce; this.big = !!o.big; this.remove = false;
+    this.hitList = []; this.antiHart = !!o.antiHart; this.homing = o.homing || 0;
+    this.t = 0;
+  }
+  Shot.prototype.update = function (dt, world, player) {
+    this.t += dt;
+    if (this.homing && player && !player.dead) {
+      var dx = player.cx() - this.x, dy = player.cy() - this.y, d = Math.hypot(dx, dy) || 1;
+      this.vx += (dx / d) * this.homing; this.vy += (dy / d) * this.homing;
+      var sp = Math.hypot(this.vx, this.vy), mx = 5.2;
+      if (sp > mx) { this.vx = this.vx / sp * mx; this.vy = this.vy / sp * mx; }
+    }
+    this.x += this.vx; this.y += this.vy;
+    this.life -= dt;
+    if (this.life <= 0) this.remove = true;
+    if (!this.antiHart && world.solidRect({ x: this.x, y: this.y, w: this.w, h: this.h })) {
+      world.parts.burst(this.x, this.y, 6, { color: this.color, glow: true, smax: 2, lmax: 0.3 });
+      if (!this.pierce) this.remove = true;
+    }
+    if (Math.random() < 0.6) {
+      world.parts.spawn({ x: this.x + this.w / 2, y: this.y + this.h / 2, vx: 0, vy: 0,
+        life: 0.22, size: this.big ? 3 : 2, color: this.color, glow: true, grav: 0 });
+    }
+  };
+  Shot.prototype.draw = function (cam) {
+    var x = Math.round(this.x - cam.x), y = Math.round(this.y - cam.y);
+    Gfx.glow(x + this.w / 2, y + this.h / 2, this.big ? 16 : 9, this.color, 0.55);
+    Gfx.rect(x, y, this.w, this.h, this.color);
+    Gfx.rect(x + 1, y + 1, this.w - 2, this.h - 2, '#ffffff');
+  };
+
+  /* ================= PICKUPS ================= */
+  function Pickup(x, y, kind) {
+    this.x = x + 2; this.y = y + 2; this.w = 12; this.h = 12;
+    this.kind = kind; this.t = Math.random() * 6; this.remove = false;
+  }
+  Pickup.prototype.update = function (dt) { this.t += dt; };
+  Pickup.prototype.draw = function (cam) {
+    var x = Math.round(this.x - cam.x + 6), y = Math.round(this.y - cam.y + 6 + Math.sin(this.t * 2.4) * 2);
+    if (this.kind === 'hart') {
+      Gfx.glow(x, y, 12, PAL.hart, 0.45);
+      Gfx.rect(x - 1, y - 5, 2, 10, PAL.hart); Gfx.rect(x - 5, y - 1, 10, 2, PAL.hart);
+      Gfx.rect(x - 2, y - 2, 4, 4, PAL.hartGlow);
+    } else if (this.kind === 'repair') {
+      Gfx.glow(x, y, 12, PAL.green, 0.4);
+      Gfx.rect(x - 5, y - 2, 10, 4, PAL.green); Gfx.rect(x - 2, y - 5, 4, 10, PAL.green);
+    } else {
+      var p = 0.5 + 0.5 * Math.sin(this.t * 3);
+      Gfx.glow(x, y, 14, PAL.gold, 0.35 + p * 0.25);
+      Gfx.rect(x - 4, y - 5, 8, 10, PAL.amber);
+      Gfx.rect(x - 3, y - 4, 6, 8, PAL.gold);
+      Gfx.rect(x - 1, y - 3, 2, 6, PAL.void);
+      Gfx.ring(x, y, 9 + p * 3, PAL.gold, 1, 0.4);
+    }
+  };
+
+  /* ================= ENEMIES ================= */
+  /* Random Access Sentry — the game's stock foot soldier */
+  function Sentry(x, y) {
+    Actor.call(this, x + 2, y - 8, 12, 24);
+    this.type = 'sentry'; this.hp = this.maxhp = 22; this.score = 120;
+    this.face = -1; this.lungeT = 0; this.cool = C.rand(0.4, 1.4);
+  }
+  Sentry.prototype = Object.create(Actor.prototype);
+  Sentry.prototype.update = function (dt, world, player) {
+    this.anim += dt * 10;
+    if (this.hurtT > 0) this.hurtT -= dt;
+    this.vy = Math.min(this.vy + 0.46, 12);
+    var dx = player.cx() - this.cx(), adx = Math.abs(dx);
+    var see = adx < 190 && Math.abs(player.cy() - this.cy()) < 60 && !player.dead;
+
+    if (this.lungeT > 0) { this.lungeT -= dt; }
+    else if (see) {
+      this.face = dx > 0 ? 1 : -1;
+      this.cool -= dt;
+      if (adx < 46 && this.cool <= 0 && this.onGround) {
+        this.lungeT = 0.45; this.cool = 1.3; this.vx = this.face * 4.2; this.vy = -2.6;
+      } else if (adx > 26) this.vx = C.approach(this.vx, this.face * 1.25, 0.3);
+      else this.vx = C.approach(this.vx, 0, 0.3);
+    } else {
+      this.vx = C.approach(this.vx, this.face * 0.6, 0.15);
+      var probe = { x: this.x + this.face * 10, y: this.y + this.h + 2, w: 4, h: 4 };
+      if (this.hitWall || !world.solidRect(probe)) { this.face *= -1; this.hitWall = false; }
+    }
+    this.onGround = false;
+    world.move(this, this.vx, this.vy);
+    if (this.onGround) this.vx *= 0.86;
+  };
+  Sentry.prototype.draw = function (cam) {
+    var x = Math.round(this.x - cam.x), y = Math.round(this.y - cam.y);
+    Gfx.rectA(x + 1, y + this.h - 1, this.w - 2, 2, '#000', 0.3);
+    figure(x - 1, y, {
+      w: 14, h: 24, face: this.face, phase: this.anim,
+      state: this.lungeT > 0 ? 'attack' : (Math.abs(this.vx) > 0.4 ? 'run' : 'idle'),
+      suit: this.hurtT > 0 ? PAL.white : PAL.steel, trim: PAL.raRed,
+      glow: PAL.raRed, eye: PAL.raRed, visor: true, core: false
+    });
+  };
+
+  /* RA-Drone — patrols the air, drops on you */
+  function Drone(x, y) {
+    Actor.call(this, x + 2, y, 14, 12);
+    this.type = 'drone'; this.hp = this.maxhp = 14; this.score = 150;
+    this.home = y + 6; this.t = C.rand(0, 6); this.diveT = 0; this.cool = C.rand(1, 3);
+  }
+  Drone.prototype = Object.create(Actor.prototype);
+  Drone.prototype.update = function (dt, world, player) {
+    this.t += dt; this.anim += dt * 12;
+    if (this.hurtT > 0) this.hurtT -= dt;
+    var dx = player.cx() - this.cx(), dy = player.cy() - this.cy();
+    var near = Math.abs(dx) < 200 && !player.dead;
+    if (this.diveT > 0) {
+      this.diveT -= dt;
+      this.x += this.vx; this.y += this.vy;
+      if (world.solidRect(this)) {
+        this.diveT = 0; this.vy = 0;
+        world.parts.burst(this.cx(), this.cy(), 8, { color: PAL.raRed, glow: true });
+        this.y -= 6;
+      }
+    } else if (near) {
+      this.face = dx > 0 ? 1 : -1;
+      this.x += C.clamp(dx * 0.012, -1.5, 1.5);
+      this.y = C.lerp(this.y, this.home + Math.sin(this.t * 2) * 10, 0.05);
+      this.cool -= dt;
+      if (this.cool <= 0 && Math.abs(dx) < 90 && dy > 8) {
+        this.cool = C.rand(2.2, 3.6); this.diveT = 0.9;
+        var d = Math.hypot(dx, dy) || 1;
+        this.vx = dx / d * 4.4; this.vy = dy / d * 4.4;
+        Audio.sfx('dash');
+      }
+    } else {
+      this.x += Math.sin(this.t) * 0.6;
+      this.y = this.home + Math.sin(this.t * 2) * 8;
+    }
+  };
+  Drone.prototype.draw = function (cam) {
+    var x = Math.round(this.x - cam.x), y = Math.round(this.y - cam.y);
+    var w = this.w, s = Math.sin(this.anim) * 2;
+    Gfx.glow(x + w / 2, y + 6, 12, PAL.raRed, this.diveT > 0 ? 0.5 : 0.28);
+    Gfx.rect(x, y + 3, w, 6, this.hurtT > 0 ? PAL.white : PAL.steel);
+    Gfx.rect(x + 2, y + 1, w - 4, 3, PAL.steelLite);
+    Gfx.rect(x - 2, y + 4 + s, 3, 2, PAL.steelLite);
+    Gfx.rect(x + w - 1, y + 4 - s, 3, 2, PAL.steelLite);
+    Gfx.rect(x + (this.face > 0 ? w - 4 : 2), y + 5, 2, 2, PAL.raRed);
+  };
+
+  /* Akashi Mask — moves on the motion-capture Akashi recorded */
+  function Mask(x, y) {
+    Actor.call(this, x + 2, y - 8, 12, 24);
+    this.type = 'mask'; this.hp = this.maxhp = 26; this.score = 220;
+    this.cool = C.rand(0.6, 1.6); this.blinkT = 0; this.strikeT = 0;
+  }
+  Mask.prototype = Object.create(Actor.prototype);
+  Mask.prototype.update = function (dt, world, player) {
+    this.anim += dt * 12;
+    if (this.hurtT > 0) this.hurtT -= dt;
+    if (this.blinkT > 0) this.blinkT -= dt;
+    this.vy = Math.min(this.vy + 0.46, 12);
+    var dx = player.cx() - this.cx(), adx = Math.abs(dx);
+    if (!player.dead && adx < 220) {
+      this.face = dx > 0 ? 1 : -1;
+      this.cool -= dt;
+      if (this.strikeT > 0) { this.strikeT -= dt; this.vx = this.face * 3.4; }
+      else if (this.cool <= 0) {
+        if (adx > 70 && this.blinkT <= 0) {                 // short-range blink
+          this.blinkT = 0.35; this.cool = 1.6;
+          world.parts.burst(this.cx(), this.cy(), 12, { color: PAL.magenta, glow: true });
+          var nx = this.x + this.face * 56;
+          var probe = { x: nx, y: this.y, w: this.w, h: this.h };
+          if (!world.solidRect(probe)) this.x = nx;
+          world.parts.burst(this.cx(), this.cy(), 12, { color: PAL.magenta, glow: true });
+        } else if (adx < 60 && this.onGround) {
+          this.strikeT = 0.35; this.cool = 1.1; this.vy = -3.2; Audio.sfx('punch');
+        }
+      } else this.vx = C.approach(this.vx, this.face * 1.6, 0.3);
+    } else this.vx = C.approach(this.vx, 0, 0.2);
+    this.onGround = false;
+    world.move(this, this.vx, this.vy);
+    if (this.onGround) this.vx *= 0.8;
+  };
+  Mask.prototype.draw = function (cam) {
+    var x = Math.round(this.x - cam.x), y = Math.round(this.y - cam.y);
+    Gfx.rectA(x + 1, y + this.h - 1, this.w - 2, 2, '#000', 0.3);
+    if (this.blinkT > 0) Gfx.glow(x + 6, y + 12, 16, PAL.magenta, 0.4);
+    figure(x - 1, y, {
+      w: 14, h: 24, face: this.face, phase: this.anim,
+      state: this.strikeT > 0 ? 'attack' : (Math.abs(this.vx) > 0.5 ? 'run' : 'idle'),
+      suit: this.hurtT > 0 ? PAL.white : '#3a2a44', trim: PAL.magenta,
+      glow: PAL.magenta, eye: PAL.magenta, faceless: true, core: false
+    });
+  };
+
+  /* Firewall Turret — bolted to the floor, unimpressed */
+  function Turret(x, y) {
+    Actor.call(this, x + 2, y + 4, 12, 12);
+    this.type = 'turret'; this.hp = this.maxhp = 18; this.score = 100;
+    this.cool = C.rand(0.5, 1.5); this.aim = 0;
+  }
+  Turret.prototype = Object.create(Actor.prototype);
+  Turret.prototype.update = function (dt, world, player) {
+    this.anim += dt * 4;
+    if (this.hurtT > 0) this.hurtT -= dt;
+    var dx = player.cx() - this.cx(), dy = player.cy() - this.cy();
+    if (Math.abs(dx) < 240 && !player.dead) {
+      this.face = dx > 0 ? 1 : -1;
+      this.aim = Math.atan2(dy, dx);
+      this.cool -= dt;
+      if (this.cool <= 0) {
+        this.cool = C.rand(1.4, 2.2);
+        world.spawnShot({ x: this.cx() - 3, y: this.cy() - 2,
+          vx: Math.cos(this.aim) * 3.4, vy: Math.sin(this.aim) * 3.4,
+          w: 6, h: 4, dmg: 8, owner: 'enemy', color: PAL.raRed, life: 2.4 });
+        Audio.sfx('blast');
+      }
+    }
+  };
+  Turret.prototype.draw = function (cam) {
+    var x = Math.round(this.x - cam.x), y = Math.round(this.y - cam.y);
+    Gfx.rect(x, y + 6, 12, 6, this.hurtT > 0 ? PAL.white : PAL.steel);
+    Gfx.rect(x + 2, y + 2, 8, 6, PAL.steelLite);
+    var bx = x + 6 + Math.cos(this.aim) * 7, by = y + 5 + Math.sin(this.aim) * 7;
+    Gfx.line(x + 6, y + 5, bx, by, PAL.raRed, 2);
+    Gfx.glow(x + 6, y + 5, 7, PAL.raRed, 0.3);
+  };
+
+  global.RA.ent = {
+    World: World, Player: Player, Shot: Shot, Pickup: Pickup,
+    Sentry: Sentry, Drone: Drone, Mask: Mask, Turret: Turret,
+    Actor: Actor, figure: figure
+  };
+})(window);
+
+/* ===== src/game/bosses.js ===== */
+/* =============================================================
+   game/bosses.js — RA.ONE, in three escalating builds.
+
+   v1.0  the launch build: brute force
+   v2.0  the shapeshifter: wears your face, blocks your last move
+   v3.0  the third level: one bullet, ten copies, one shadow
+   ============================================================= */
+(function (global) {
+  'use strict';
+  var C = global.RA.core, Gfx = C.Gfx, PAL = C.PAL, T = C.TILE;
+  var Audio = global.RA.Audio, ent = global.RA.ent;
+
+  function drawRa(x, y, o) {
+    o = o || {};
+    var w = o.w || 22, h = o.h || 40;
+    // the dark he carries with him
+    if (o.aura !== false) {
+      Gfx.glow(x + w / 2, y + h * 0.45, w * 1.5, '#000000', 0.55 * (o.alpha === undefined ? 1 : o.alpha));
+      Gfx.glow(x + w / 2, y + h * 0.35, w * 1.1, o.eye || PAL.raRed, 0.14 * (o.alpha === undefined ? 1 : o.alpha));
+    }
+    // cape / silhouette
+    if (o.alpha !== undefined) Gfx.ctx.globalAlpha = o.alpha;
+    Gfx.rect(x + 1, y + 8, w - 2, h - 14, o.dark || PAL.ra);
+    if (o.alpha !== undefined) Gfx.ctx.globalAlpha = 1;
+    ent.figure(x, y, {
+      w: w, h: h, face: o.face || 1, phase: o.phase || 0, state: o.state || 'idle',
+      suit: o.hurt ? PAL.white : (o.suit || PAL.ra),
+      trim: o.trim || PAL.raSeam,
+      glow: o.glow || PAL.raRed, eye: o.eye || PAL.raRed,
+      faceless: o.faceless !== false, core: !!o.core, coreLevel: o.coreLevel || 1,
+      alpha: o.alpha
+    });
+    // the seams that make him read as "rendered, not born"
+    var a = (o.alpha === undefined ? 1 : o.alpha);
+    // rim light down both flanks, so a black figure still has edges
+    Gfx.rectA(x + 2, y + h * 0.22, 1, h * 0.52, o.trim || PAL.raSeam, 0.45 * a);
+    Gfx.rectA(x + w - 3, y + h * 0.22, 1, h * 0.52, o.trim || PAL.raSeam, 0.45 * a);
+    // the scan band where a face would be
+    Gfx.rectA(x + w * 0.28, y + h * 0.10, w * 0.44, 2, o.eye || PAL.raRed, 0.85 * a);
+    Gfx.rectA(x + 3, y + 12, w - 6, 1, o.trim || PAL.raSeam, 0.8 * a);
+    Gfx.rectA(x + 3, y + 18, w - 6, 1, o.trim || PAL.raSeam, 0.5 * a);
+    if (o.eyeGlow !== false) Gfx.glow(x + w / 2, y + 4, 9, o.eye || PAL.raRed, 0.4 * a);
+  }
+
+  /* ================= BASE ================= */
+  function Boss(x, y, level, game) {
+    this.x = x; this.y = y; this.w = 22; this.h = 40;
+    this.vx = 0; this.vy = 0; this.face = -1;
+    this.anim = 0; this.hurtT = 0; this.phase = 1; this.t = 0;
+    this.state = 'idle'; this.dead = false; this.remove = false;
+    this.onGround = false; this.game = game; this.level = level;
+    this.cool = 1.2; this.actT = 0; this.act = null;
+    this.intro = 2.0; this.contact = 12; this.invulnLabel = null;
+    this.hp = this.maxhp = 200;
+    this.name = 'RA.ONE';
+  }
+  Boss.prototype.cx = function () { return this.x + this.w / 2; };
+  Boss.prototype.cy = function () { return this.y + this.h / 2; };
+  Boss.prototype.physics = function (world) {
+    this.vy = Math.min(this.vy + 0.46, 13);
+    this.onGround = false;
+    world.move(this, this.vx, this.vy);
+  };
+  Boss.prototype.damage = function (n, world, kx, kind) {
+    if (this.dead || this.immune) {
+      if (this.immune) {
+        world.parts.burst(this.cx(), this.cy(), 6, { color: PAL.steelLite, smax: 2, lmax: 0.3 });
+        this.onImmuneHit && this.onImmuneHit(n, kind, world);
+      }
+      return false;
+    }
+    var mult = this.damageMult ? this.damageMult(kind) : 1;
+    this.hp -= n * mult;
+    this.hurtT = 0.14;
+    Audio.sfx('hitflesh');
+    world.parts.burst(this.cx(), this.cy(), 10, { color: PAL.raSeam, glow: true, smax: 3 });
+    if (mult < 1) {
+      world.parts.burst(this.cx(), this.cy(), 6, { color: PAL.steelLite, smax: 2 });
+      if (this.game) this.game.toast('BLOCKED', PAL.steelLite);
+    }
+    if (this.hp <= 0) this.kill(world);
+    return true;
+  };
+  Boss.prototype.kill = function (world) {
+    this.hp = 0; this.dead = true;
+    Audio.sfx('explode'); Audio.sfx('bossroar');
+    Gfx.shake(6, 0.8); Gfx.flash('#ffffff', 0.6, 0.5);
+    world.parts.burst(this.cx(), this.cy(), 60, { color: PAL.raSeam, glow: true, smax: 5, lmax: 1.4 });
+    world.parts.burst(this.cx(), this.cy(), 30, { color: PAL.raRed, glow: true, smax: 4, lmax: 1.0 });
+    if (this.game) this.game.addScore(5000);
+  };
+  Boss.prototype.hitboxes = function () { return []; };
+
+  /* ================= RA.ONE v1.0 ================= */
+  function RaOne1(x, y, level, game) {
+    Boss.call(this, x, y, level, game);
+    this.hp = this.maxhp = 240;
+    this.name = 'RA.ONE v1.0';
+    this.sub = 'RANDOM ACCESS VERSION 1.0';
+  }
+  RaOne1.prototype = Object.create(Boss.prototype);
+  RaOne1.prototype.update = function (dt, world, player) {
+    this.t += dt; this.anim += dt * 8;
+    if (this.hurtT > 0) this.hurtT -= dt;
+    if (this.intro > 0) { this.intro -= dt; this.physics(world); return; }
+
+    var dx = player.cx() - this.cx(), adx = Math.abs(dx);
+    this.face = dx > 0 ? 1 : -1;
+    var enraged = this.hp < this.maxhp * 0.5;
+
+    if (this.act) {
+      this.actT -= dt;
+      switch (this.act) {
+        case 'charge':
+          this.vx = this.face * (enraged ? 6.4 : 5.2);
+          this.state = 'run';
+          world.parts.spawn({ x: this.cx(), y: this.cy(), vx: 0, vy: 0, life: 0.3,
+            size: 3, color: PAL.raRed, glow: true, grav: 0 });
+          if (this.hitWall) { this.actT = 0; this.hitWall = false; Gfx.shake(3, 0.2); }
+          break;
+        case 'slam':
+          this.state = 'attack';
+          if (this.actT <= 0 && this.onGround) this.shockwave(world, player);
+          break;
+        case 'volley':
+          this.state = 'attack';
+          if (this.actT <= 0) this.volley(world, player, enraged ? 5 : 3);
+          break;
+      }
+      if (this.actT <= 0) {
+        if (this.act === 'slam' && !this.onGround) { /* wait for landing */ }
+        else { this.act = null; this.cool = enraged ? 0.55 : 0.95; }
+      }
+    } else {
+      this.state = Math.abs(this.vx) > 0.4 ? 'run' : 'idle';
+      this.vx = C.approach(this.vx, adx > 60 ? this.face * 1.5 : -this.face * 0.9, 0.24);
+      this.cool -= dt;
+      if (this.cool <= 0) {
+        var r = Math.random();
+        if (adx < 90 && r < 0.4) { this.act = 'slam'; this.actT = 0.5; this.vy = -7.5; }
+        else if (r < 0.75) { this.act = 'charge'; this.actT = enraged ? 0.75 : 0.6; Audio.sfx('bossroar'); }
+        else { this.act = 'volley'; this.actT = 0.45; }
+      }
+    }
+    this.physics(world);
+    if (this.onGround && !this.act) this.vx *= 0.9;
+  };
+  RaOne1.prototype.shockwave = function (world, player) {
+    Gfx.shake(5, 0.35); Audio.sfx('explode');
+    world.parts.burst(this.cx(), this.y + this.h, 26,
+      { color: PAL.raRed, glow: true, angle: -Math.PI / 2, spread: 1.4, smax: 5 });
+    for (var s = -1; s <= 1; s += 2) {
+      world.spawnShot({ x: this.cx(), y: this.y + this.h - 8, vx: s * 4.2, vy: 0,
+        w: 10, h: 8, dmg: 14, owner: 'enemy', color: PAL.raRed, life: 1.3 });
+    }
+  };
+  RaOne1.prototype.volley = function (world, player, n) {
+    Audio.sfx('blast');
+    var base = Math.atan2(player.cy() - this.cy(), player.cx() - this.cx());
+    for (var i = 0; i < n; i++) {
+      var a = base + (i - (n - 1) / 2) * 0.20;
+      world.spawnShot({ x: this.cx(), y: this.cy(), vx: Math.cos(a) * 4.4, vy: Math.sin(a) * 4.4,
+        w: 8, h: 5, dmg: 10, owner: 'enemy', color: PAL.raRed, life: 2.0 });
+    }
+  };
+  RaOne1.prototype.draw = function (cam) {
+    var x = Math.round(this.x - cam.x), y = Math.round(this.y - cam.y);
+    Gfx.rectA(x + 2, y + this.h - 1, this.w - 4, 3, '#000', 0.5);
+    if (this.act === 'charge') Gfx.glow(x + 11, y + 20, 26, PAL.raRed, 0.35);
+    drawRa(x, y, { face: this.face, phase: this.anim, state: this.state, hurt: this.hurtT > 0 });
+  };
+
+  /* ================= RA.ONE v2.0 — THE SHAPESHIFTER ================= */
+  function RaOne2(x, y, level, game) {
+    Boss.call(this, x, y, level, game);
+    this.hp = this.maxhp = 320;
+    this.name = 'RA.ONE v2.0';
+    this.sub = 'SHAPESHIFT / MIMIC';
+    this.mimic = false; this.mimicT = 0; this.blockType = null;
+    this.decoys = []; this.morphT = 0;
+  }
+  RaOne2.prototype = Object.create(Boss.prototype);
+  RaOne2.prototype.damageMult = function (kind) {
+    if (this.mimic && kind && kind === this.blockType) return 0.15;
+    return this.mimic ? 0.75 : 1;
+  };
+  RaOne2.prototype.update = function (dt, world, player) {
+    this.t += dt; this.anim += dt * 9;
+    if (this.hurtT > 0) this.hurtT -= dt;
+    if (this.morphT > 0) this.morphT -= dt;
+    if (this.intro > 0) { this.intro -= dt; this.physics(world); return; }
+
+    var dx = player.cx() - this.cx(), adx = Math.abs(dx);
+    this.face = dx > 0 ? 1 : -1;
+    var enraged = this.hp < this.maxhp * 0.45;
+
+    // he copies your last move and shuts it down; you have to change hands
+    if (this.mimic) {
+      this.mimicT -= dt;
+      if (this.mimicT <= 0) { this.mimic = false; this.blockType = null; this.morphT = 0.4; }
+      else if (player.lastAttackKind && player.lastAttackKind !== this.blockType && Math.random() < dt * 1.2) {
+        this.blockType = player.lastAttackKind;
+        this.game && this.game.toast('HE COPIED YOUR ' + (this.blockType === 'melee' ? 'FIST' : 'BLAST'), PAL.magenta);
+      }
+    }
+
+    if (this.act) {
+      this.actT -= dt;
+      switch (this.act) {
+        case 'blink':
+          this.state = 'idle';
+          if (this.actT <= 0) {
+            world.parts.burst(this.cx(), this.cy(), 16, { color: PAL.raSeam, glow: true });
+            var nx = player.cx() + (Math.random() < 0.5 ? -60 : 60);
+            this.x = C.clamp(nx, 32, world.pxW - 48);
+            this.y = player.y - 8;
+            world.parts.burst(this.cx(), this.cy(), 16, { color: PAL.raSeam, glow: true });
+            Audio.sfx('dash');
+          }
+          break;
+        case 'rush':
+          this.vx = this.face * 6.0; this.state = 'run';
+          if (this.hitWall) { this.actT = 0; this.hitWall = false; }
+          break;
+        case 'mirror':
+          this.state = 'attack';
+          if (this.actT <= 0) this.mirrorVolley(world, player);
+          break;
+        case 'sweep':
+          this.state = 'attack';
+          if (this.actT <= 0) {
+            Audio.sfx('blast'); Gfx.shake(3, 0.2);
+            for (var i = 0; i < 6; i++) {
+              var a = -Math.PI / 2 + (i - 2.5) * 0.28;
+              world.spawnShot({ x: this.cx(), y: this.cy() - 6, vx: Math.cos(a) * 3.6, vy: Math.sin(a) * 3.6,
+                w: 7, h: 5, dmg: 11, owner: 'enemy', color: PAL.magenta, life: 2.4, homing: enraged ? 0.05 : 0 });
+            }
+          }
+          break;
+      }
+      if (this.actT <= 0) { this.act = null; this.cool = enraged ? 0.5 : 0.85; }
+    } else {
+      this.state = Math.abs(this.vx) > 0.4 ? 'run' : 'idle';
+      this.vx = C.approach(this.vx, adx > 80 ? this.face * 1.9 : -this.face * 1.1, 0.26);
+      this.cool -= dt;
+      if (this.cool <= 0) {
+        var r = Math.random();
+        if (!this.mimic && r < 0.3) {
+          this.mimic = true; this.mimicT = enraged ? 7 : 5; this.morphT = 0.5;
+          this.blockType = player.lastAttackKind || 'melee';
+          Audio.sfx('detach'); Gfx.flash(PAL.magenta, 0.3, 0.2);
+          this.game && this.game.toast('HE IS WEARING YOUR FACE', PAL.magenta);
+        }
+        else if (r < 0.5) { this.act = 'blink'; this.actT = 0.3; }
+        else if (r < 0.72) { this.act = 'rush'; this.actT = 0.55; }
+        else if (r < 0.88) { this.act = 'mirror'; this.actT = 0.4; }
+        else { this.act = 'sweep'; this.actT = 0.45; }
+      }
+    }
+    this.physics(world);
+    if (this.onGround && !this.act) this.vx *= 0.9;
+  };
+  RaOne2.prototype.mirrorVolley = function (world, player) {
+    Audio.sfx('blast');
+    // he throws your own blast back at you, from two mirror images
+    for (var s = -1; s <= 1; s += 2) {
+      var ox = this.cx() + s * 26;
+      world.parts.burst(ox, this.cy(), 10, { color: PAL.hart, glow: true });
+      var a = Math.atan2(player.cy() - this.cy(), player.cx() - ox);
+      world.spawnShot({ x: ox, y: this.cy(), vx: Math.cos(a) * 5.0, vy: Math.sin(a) * 5.0,
+        w: 8, h: 5, dmg: 12, owner: 'enemy', color: PAL.hart, life: 2.2 });
+    }
+  };
+  RaOne2.prototype.draw = function (cam) {
+    var x = Math.round(this.x - cam.x), y = Math.round(this.y - cam.y);
+    Gfx.rectA(x + 2, y + this.h - 1, this.w - 4, 2, '#000', 0.4);
+    if (this.morphT > 0) {
+      for (var i = 0; i < 7; i++) {
+        Gfx.rectA(x - 4 + Math.random() * 30, y + Math.random() * this.h, 14, 2, PAL.raSeam, 0.5);
+      }
+    }
+    if (this.mimic) {
+      // wearing G.One's colours — same silhouette, wrong light
+      drawRa(x, y, { face: this.face, phase: this.anim, state: this.state, hurt: this.hurtT > 0,
+        suit: PAL.bone, trim: PAL.magenta, dark: '#2a2036', eye: PAL.magenta, glow: PAL.magenta,
+        faceless: false, core: true, coreLevel: 0.9 });
+      Gfx.glow(x + 11, y + 20, 24, PAL.magenta, 0.3);
+    } else {
+      drawRa(x, y, { face: this.face, phase: this.anim, state: this.state, hurt: this.hurtT > 0 });
+    }
+  };
+
+  /* ================= RA.ONE v3.0 — THE THIRD LEVEL ================= */
+  /* Phase 1 PROVOKE : he cannot be damaged. Break his guard.
+     Phase 2 ONE BULLET: the anti-H.A.R.T. round. It only kills an
+             attached H.A.R.T. Detach, and let him waste it.
+     Phase 3 TEN COPIES: only the original casts a shadow. */
+  function RaOne3(x, y, level, game) {
+    Boss.call(this, x, y, level, game);
+    this.hp = this.maxhp = 300;
+    this.name = 'RA.ONE v3.0';
+    this.sub = 'THE THIRD LEVEL';
+    this.phase = 1;
+    this.guard = 100; this.guardMax = 100;
+    this.immune = true; this.invulnLabel = 'IMMUNE — BREAK HIS GUARD';
+    this.aimT = 0; this.aiming = false; this.bulletSpent = false;
+    this.clones = []; this.realIdx = 0; this.shuffleT = 0; this.hitsOnReal = 0;
+    this.pulseT = 0; this.contact = 14;
+    this.bannerT = 0;
+  }
+  RaOne3.prototype = Object.create(Boss.prototype);
+
+  RaOne3.prototype.onImmuneHit = function (n, kind, world) {
+    if (this.phase !== 1) return;
+    this.guard -= n * 0.85;
+    Audio.sfx('punch');
+    if (this.guard <= 0) {
+      this.guard = 0;
+      this.enterPhase2(world);
+    }
+  };
+
+  RaOne3.prototype.enterPhase2 = function (world) {
+    this.phase = 2; this.bannerT = 3.4;
+    this.invulnLabel = 'ONE BULLET — DETACH YOUR H.A.R.T. [H]';
+    this.aiming = false; this.aimT = 0; this.cool = 1.6;
+    Audio.sfx('bossroar'); Gfx.flash(PAL.raRed, 0.5, 0.4); Gfx.shake(5, 0.6);
+    this.game && this.game.unlockShardByTitle('RULE 4 — THE ONE BULLET');
+    this.game && this.game.toast('HE HAS DRAWN THE ANTI-H.A.R.T. GUN', PAL.raRed);
+  };
+
+  RaOne3.prototype.enterPhase3 = function (world) {
+    this.phase = 3; this.immune = false; this.bannerT = 3.4;
+    this.invulnLabel = 'TEN COPIES — ONLY THE ORIGINAL CASTS A SHADOW';
+    this.bulletSpent = true;
+    Audio.sfx('bossroar'); Gfx.flash('#ffffff', 0.7, 0.6); Gfx.shake(7, 0.9);
+    this.game && this.game.unlockShardByTitle('THE TRICK');
+    this.game && this.game.unlockShardByTitle('THE SHADOW');
+    this.game && this.game.toast('TEN COPIES. ONE SHADOW.', PAL.gold);
+    this.spawnClones(world);
+  };
+
+  RaOne3.prototype.spawnClones = function (world) {
+    this.clones = [];
+    var floorY = this.y;
+    for (var i = 0; i < 10; i++) {
+      this.clones.push({
+        x: 40 + i * ((world.pxW - 130) / 9), y: floorY,
+        alive: true, t: Math.random() * 6, face: -1, fade: 0
+      });
+    }
+    this.realIdx = C.randInt(0, 9);
+    this.shuffleT = 7;
+  };
+
+  RaOne3.prototype.shuffle = function (world) {
+    var alive = [];
+    for (var i = 0; i < this.clones.length; i++) if (this.clones[i].alive) alive.push(i);
+    if (!alive.length) return;
+    for (var j = 0; j < this.clones.length; j++) {
+      var c = this.clones[j];
+      if (!c.alive) continue;
+      world.parts.burst(c.x + 11, c.y + 20, 10, { color: PAL.raSeam, glow: true });
+      c.x = C.clamp(40 + Math.random() * (world.pxW - 130), 32, world.pxW - 60);
+      c.fade = 0.35;
+    }
+    this.realIdx = C.pick(alive);
+    this.shuffleT = 6 + Math.random() * 2;
+    Audio.sfx('detach');
+  };
+
+  RaOne3.prototype.update = function (dt, world, player) {
+    this.t += dt; this.anim += dt * 9;
+    if (this.hurtT > 0) this.hurtT -= dt;
+    if (this.bannerT > 0) this.bannerT -= dt;
+    if (this.intro > 0) { this.intro -= dt; this.physics(world); return; }
+
+    var dx = player.cx() - this.cx();
+    this.face = dx > 0 ? 1 : -1;
+
+    if (this.phase === 1) this.updateP1(dt, world, player, dx);
+    else if (this.phase === 2) this.updateP2(dt, world, player, dx);
+    else this.updateP3(dt, world, player);
+  };
+
+  /* --- phase 1: he is simply better than you --- */
+  RaOne3.prototype.updateP1 = function (dt, world, player, dx) {
+    var adx = Math.abs(dx);
+    if (this.act) {
+      this.actT -= dt;
+      if (this.act === 'rush') {
+        this.vx = this.face * 6.2; this.state = 'run';
+        if (this.hitWall) { this.actT = 0; this.hitWall = false; }
+      } else if (this.act === 'arc') {
+        this.state = 'attack';
+        if (this.actT <= 0) {
+          Audio.sfx('blast');
+          for (var i = 0; i < 7; i++) {
+            var a = (i / 7) * Math.PI * 2 + this.t;
+            world.spawnShot({ x: this.cx(), y: this.cy(), vx: Math.cos(a) * 3.6, vy: Math.sin(a) * 3.6,
+              w: 7, h: 5, dmg: 10, owner: 'enemy', color: PAL.raRed, life: 2.2 });
+          }
+        }
+      } else if (this.act === 'mind') {
+        this.state = 'attack';
+        if (this.actT <= 0) {
+          // mind control: he reads you and turns your own controls around
+          Audio.sfx('detach'); Gfx.flash(PAL.magenta, 0.4, 0.3);
+          player.invertT = 2.4;
+          this.game && this.game.toast('HE IS IN YOUR HEAD — CONTROLS INVERTED', PAL.magenta);
+          world.parts.burst(this.cx(), this.cy(), 30, { color: PAL.magenta, glow: true, smax: 4 });
+        }
+      }
+      if (this.actT <= 0) { this.act = null; this.cool = 0.7; }
+    } else {
+      this.state = Math.abs(this.vx) > 0.4 ? 'run' : 'idle';
+      this.vx = C.approach(this.vx, adx > 70 ? this.face * 2.0 : -this.face * 1.2, 0.26);
+      this.cool -= dt;
+      if (this.cool <= 0) {
+        var r = Math.random();
+        if (r < 0.42) { this.act = 'rush'; this.actT = 0.55; }
+        else if (r < 0.8) { this.act = 'arc'; this.actT = 0.45; }
+        else { this.act = 'mind'; this.actT = 0.7; }
+      }
+    }
+    this.physics(world);
+    if (this.onGround && !this.act) this.vx *= 0.9;
+  };
+
+  /* --- phase 2: the one bullet --- */
+  RaOne3.prototype.updateP2 = function (dt, world, player, dx) {
+    this.state = 'idle';
+    this.vx = C.approach(this.vx, 0, 0.3);
+    if (!this.aiming) {
+      this.cool -= dt;
+      if (this.cool <= 0) { this.aiming = true; this.aimT = 2.6; Audio.sfx('charge'); }
+    } else {
+      this.aimT -= dt;
+      this.state = 'attack';
+      if (this.aimT <= 0) {
+        this.aiming = false; this.cool = 2.4;
+        this.fireAntiHart(world, player);
+      }
+    }
+    this.physics(world);
+  };
+
+  RaOne3.prototype.fireAntiHart = function (world, player) {
+    Audio.sfx('shot'); Gfx.shake(4, 0.4); Gfx.flash(PAL.raRed, 0.4, 0.25);
+    var a = Math.atan2(player.cy() - this.cy(), player.cx() - this.cx());
+    world.spawnShot({
+      x: this.cx(), y: this.cy(), vx: Math.cos(a) * 6.6, vy: Math.sin(a) * 6.6,
+      w: 10, h: 6, dmg: 9999, owner: 'antihart', color: PAL.raRed,
+      life: 3.0, antiHart: true, homing: 0.09, big: true
+    });
+  };
+
+  /* --- phase 3: ten copies, one shadow --- */
+  RaOne3.prototype.updateP3 = function (dt, world, player) {
+    this.shuffleT -= dt;
+    if (this.shuffleT <= 0) this.shuffle(world);
+    this.pulseT -= dt;
+
+    var alive = 0, real = this.clones[this.realIdx];
+    for (var i = 0; i < this.clones.length; i++) {
+      var c = this.clones[i];
+      if (!c.alive) continue;
+      alive++;
+      c.t += dt;
+      if (c.fade > 0) c.fade -= dt;
+      c.face = player.cx() > c.x + 9 ? 1 : -1;
+      c.x += Math.sin(c.t * 0.8 + i) * 0.35;
+    }
+    // the pack takes potshots
+    if (this.pulseT <= 0 && alive > 0) {
+      this.pulseT = C.clamp(2.6 - (10 - alive) * 0.12, 0.9, 2.6);
+      var shooter = null, tries = 0;
+      while (!shooter && tries++ < 20) { var k = C.randInt(0, 9); if (this.clones[k].alive) shooter = this.clones[k]; }
+      if (shooter) {
+        var ang = Math.atan2(player.cy() - (shooter.y + 20), player.cx() - (shooter.x + 11));
+        world.spawnShot({ x: shooter.x + 11, y: shooter.y + 20,
+          vx: Math.cos(ang) * 4.2, vy: Math.sin(ang) * 4.2,
+          w: 7, h: 5, dmg: 9, owner: 'enemy', color: PAL.raRed, life: 2.2 });
+        Audio.sfx('blast');
+      }
+    }
+    // the real one keeps a body for the health bar / contact damage
+    if (real && real.alive) { this.x = real.x; this.y = real.y; }
+  };
+
+  /* a hit landed on the copies — was it the one with the shadow? */
+  RaOne3.prototype.hitClone = function (idx, dmg, world, player) {
+    var c = this.clones[idx];
+    if (!c || !c.alive) return;
+    if (idx === this.realIdx) {
+      this.hitsOnReal++;
+      this.hp -= dmg;
+      this.hurtT = 0.15;
+      Audio.sfx('hitflesh'); Gfx.shake(3, 0.2);
+      world.parts.burst(c.x + 11, c.y + 20, 20, { color: PAL.gold, glow: true, smax: 4 });
+      this.game && this.game.toast('THAT ONE HAD A SHADOW', PAL.gold);
+      if (this.hp <= 0) { this.kill(world); }
+    } else {
+      c.alive = false;
+      Audio.sfx('explode');
+      world.parts.burst(c.x + 11, c.y + 20, 24, { color: PAL.raSeam, glow: true, smax: 3 });
+      player.hurt(7, world, c.x < player.x ? 1 : -1);
+      this.game && this.game.toast('A COPY. NO SHADOW.', PAL.steelLite);
+    }
+  };
+
+  RaOne3.prototype.cloneBoxes = function () {
+    var out = [];
+    if (this.phase !== 3) return out;
+    for (var i = 0; i < this.clones.length; i++) {
+      var c = this.clones[i];
+      if (c.alive) out.push({ idx: i, x: c.x, y: c.y, w: this.w, h: this.h });
+    }
+    return out;
+  };
+
+  RaOne3.prototype.draw = function (cam, player) {
+    var x, y, i;
+    if (this.phase === 3) {
+      for (i = 0; i < this.clones.length; i++) {
+        var c = this.clones[i];
+        if (!c.alive) continue;
+        x = Math.round(c.x - cam.x); y = Math.round(c.y - cam.y);
+        var isReal = (i === this.realIdx);
+        // THE TELL: every copy stands in the same pool of light.
+        // Only the original puts anything in the way of it.
+        Gfx.glow(x + this.w / 2, y + this.h + 2, 22, PAL.hart, 0.20);
+        if (isReal) {
+          Gfx.rectA(x - 1, y + this.h - 1, this.w + 2, 4, '#000', 0.85);
+          Gfx.rectA(x - 4, y + this.h + 3, this.w + 8, 3, '#000', 0.55);
+          Gfx.rectA(x - 7, y + this.h + 6, this.w + 14, 2, '#000', 0.3);
+        }
+        var fl = c.fade > 0 ? 0.4 : 1;
+        drawRa(x, y, {
+          face: c.face, phase: this.anim + i, state: 'idle',
+          hurt: isReal && this.hurtT > 0, alpha: fl,
+          eyeGlow: true
+        });
+      }
+      return;
+    }
+    x = Math.round(this.x - cam.x); y = Math.round(this.y - cam.y);
+    Gfx.rectA(x + 2, y + this.h - 1, this.w - 4, 2, '#000', 0.4);
+    if (this.phase === 1) Gfx.ring(x + 11, y + 20, 26 + Math.sin(this.t * 4) * 3, PAL.steelLite, 1, 0.35);
+    drawRa(x, y, { face: this.face, phase: this.anim, state: this.state, hurt: this.hurtT > 0 });
+
+    // the laser sight of a gun that only needs to work once
+    if (this.phase === 2 && this.aiming && player && !player.dead) {
+      var px = player.cx() - cam.x, py = player.cy() - cam.y;
+      var t = 1 - C.clamp(this.aimT / 2.6, 0, 1);
+      Gfx.ctx.globalAlpha = 0.35 + t * 0.5;
+      Gfx.line(x + 11, y + 16, px, py, PAL.raRed, 1);
+      Gfx.ctx.globalAlpha = 1;
+      Gfx.ring(px, py, 12 - t * 8, PAL.raRed, 1, 0.9);
+      Gfx.ring(px, py, 3, PAL.raRed, 1, 0.9);
+      Gfx.glow(x + 11, y + 16, 10 + t * 10, PAL.raRed, 0.4 + t * 0.4);
+    }
+  };
+
+  global.RA.bosses = {
+    make: function (kind, x, y, level, game) {
+      if (kind === 'ra1') return new RaOne1(x, y, level, game);
+      if (kind === 'ra2') return new RaOne2(x, y, level, game);
+      return new RaOne3(x, y, level, game);
+    },
+    drawRa: drawRa
+  };
+})(window);
+
+/* ===== src/game/hud.js ===== */
+/* =============================================================
+   game/hud.js — parallax backdrops, tile painting, HUD
+   ============================================================= */
+(function (global) {
+  'use strict';
+  var C = global.RA.core, Gfx = C.Gfx, PAL = C.PAL, T = C.TILE;
+  var VW = C.VIEW_W, VH = C.VIEW_H;
+
+  /* deterministic pseudo-random so the skyline doesn't crawl */
+  function h1(n) { var x = Math.sin(n * 127.1) * 43758.5453; return x - Math.floor(x); }
+
+  var Back = {
+    london: function (cam, t) {
+      Gfx.rect(0, 0, VW, VH, '#070a14');
+      // cold sky wash
+      var g = Gfx.ctx.createLinearGradient(0, 0, 0, VH);
+      g.addColorStop(0, '#0b1226'); g.addColorStop(0.6, '#0a0f1c'); g.addColorStop(1, '#05060b');
+      Gfx.ctx.fillStyle = g; Gfx.ctx.fillRect(0, 0, VW, VH);
+
+      // far skyline
+      var ox = -cam.x * 0.12;
+      for (var i = 0; i < 40; i++) {
+        var bx = ((i * 70 + ox) % (VW + 140)) - 70;
+        var bw = 32 + h1(i) * 42, bh = 60 + h1(i + 9) * 120;
+        Gfx.rect(bx, VH - 70 - bh, bw, bh + 70, '#0d1424');
+        for (var wy = 0; wy < bh; wy += 16) {
+          for (var wx = 4; wx < bw - 5; wx += 12) {
+            if (h1(i * 31 + wy + wx) > 0.86) {
+              Gfx.rectA(bx + wx, VH - 70 - bh + wy + 5, 2, 3, '#22314f', 0.55);
+            }
+          }
+        }
+      }
+      // near towers
+      ox = -cam.x * 0.32;
+      for (i = 0; i < 26; i++) {
+        var nx = ((i * 110 + ox) % (VW + 220)) - 110;
+        var nw = 56 + h1(i + 3) * 40, nh = 110 + h1(i + 7) * 130;
+        Gfx.rect(nx, VH - 40 - nh, nw, nh + 40, '#0a0f1c');
+        Gfx.rect(nx, VH - 40 - nh, nw, 2, '#16233d');
+        for (var k = 0; k < nh; k += 22) {
+          if (h1(i * 17 + k) > 0.78) Gfx.rectA(nx + 7, VH - 40 - nh + k + 6, nw - 14, 2, '#16243d', 0.7);
+        }
+      }
+      // rain
+      for (i = 0; i < 60; i++) {
+        var rx = (h1(i) * VW + t * (60 + h1(i + 1) * 90)) % VW;
+        var ry = (h1(i + 5) * VH + t * (260 + h1(i + 2) * 200)) % VH;
+        Gfx.rectA(rx, ry, 1, 6, '#3a5480', 0.35);
+      }
+    },
+
+    mumbai: function (cam, t) {
+      var g = Gfx.ctx.createLinearGradient(0, 0, 0, VH);
+      g.addColorStop(0, '#1a0f22'); g.addColorStop(0.45, '#241228'); g.addColorStop(1, '#0a0710');
+      Gfx.ctx.fillStyle = g; Gfx.ctx.fillRect(0, 0, VW, VH);
+
+      // haze + city glow
+      Gfx.glow(VW * 0.7, VH * 0.35, 220, '#ff7a1a', 0.10);
+      var ox = -cam.x * 0.15, i;
+      for (i = 0; i < 46; i++) {
+        var bx = ((i * 62 + ox) % (VW + 124)) - 62;
+        var bh = 40 + h1(i + 21) * 90;
+        Gfx.rect(bx, VH - 60 - bh, 30 + h1(i) * 28, bh + 60, '#150c1c');
+        if (h1(i * 3) > 0.5) Gfx.rectA(bx + 4, VH - 60 - bh + 8, 4, 4, PAL.amber, 0.7);
+        if (h1(i * 5) > 0.7) Gfx.rectA(bx + 14, VH - 60 - bh + 20, 4, 4, PAL.saffron, 0.6);
+      }
+      // catenary poles whipping past
+      ox = -cam.x * 0.75;
+      for (i = 0; i < 30; i++) {
+        var px = ((i * 96 + ox) % (VW + 192)) - 96;
+        Gfx.rect(px, VH - 250, 4, 250, '#0f0a14');
+        Gfx.rect(px - 16, VH - 250, 36, 3, '#0f0a14');
+        Gfx.rectA(px - 16, VH - 246, 36, 1, PAL.amber, 0.25);
+      }
+      // speed lines
+      for (i = 0; i < 26; i++) {
+        var sy = (h1(i + 40) * VH);
+        var sx = (VW - ((t * 900 + h1(i) * 1400) % (VW + 300)));
+        Gfx.rectA(sx, sy, 40 + h1(i) * 60, 1, '#ffb400', 0.16);
+      }
+    },
+
+    grid: function (cam, t) {
+      Gfx.rect(0, 0, VW, VH, '#03040a');
+      var cxp = VW / 2, hy = VH * 0.42, i;
+      // horizon glow
+      Gfx.glow(cxp, hy, 260, '#123a6b', 0.35);
+      Gfx.rectA(0, hy, VW, 1, PAL.hart, 0.5);
+      // perspective floor
+      for (i = -16; i <= 16; i++) {
+        var fx = cxp + i * 46;
+        Gfx.ctx.globalAlpha = 0.22;
+        Gfx.line(cxp + i * 8, hy, fx * 1.6 - cxp * 0.6 - cam.x * 0.2, VH, '#1c4f80', 1);
+        Gfx.ctx.globalAlpha = 1;
+      }
+      for (i = 0; i < 14; i++) {
+        var p = ((i / 14) + (t * 0.18) % (1 / 14));
+        var yy = hy + Math.pow(p, 2.4) * (VH - hy);
+        Gfx.rectA(0, yy, VW, 1, '#1c4f80', 0.30);
+      }
+      // vertical data columns
+      for (i = 0; i < 22; i++) {
+        var vx = ((i * 71 - cam.x * 0.35) % (VW + 71) + VW + 71) % (VW + 71) - 35;
+        var seed = Math.floor(i * 7);
+        Gfx.rectA(vx, 0, 1, hy, '#0d2b4d', 0.7);
+        for (var k = 0; k < 6; k++) {
+          var gy = ((h1(seed + k) * hy) + t * (18 + h1(seed) * 40)) % hy;
+          Gfx.rectA(vx - 1, gy, 3, 6, PAL.hart, 0.35);
+        }
+      }
+    }
+  };
+
+  /* a scrim between backdrop and playfield: the city must never
+     be mistaken for something you can stand on */
+  function scrim(style) {
+    Gfx.rectA(0, 0, VW, VH, style === 'mumbai' ? '#0a0410' : '#03050c', 0.42);
+  }
+
+  /* ---------- tiles ---------- */
+  function drawTiles(world, cam, t) {
+    var x0 = Math.max(0, Math.floor(cam.x / T) - 1);
+    var x1 = Math.min(world.w - 1, Math.floor((cam.x + VW) / T) + 1);
+    var y0 = Math.max(0, Math.floor(cam.y / T) - 1);
+    var y1 = Math.min(world.h - 1, Math.floor((cam.y + VH) / T) + 1);
+    var style = world.level.bg;
+
+    for (var y = y0; y <= y1; y++) {
+      for (var x = x0; x <= x1; x++) {
+        var ch = world.tiles[y][x];
+        if (ch === '.') continue;
+        var px = Math.round(x * T - cam.x), py = Math.round(y * T - cam.y);
+        if (ch === '#') {
+          var open = !world.isSolid(x, y - 1);
+          if (style === 'mumbai') {
+            Gfx.rect(px, py, T, T, '#2a2033');
+            Gfx.rect(px + 1, py + 1, T - 2, T - 2, '#33263e');
+            if (open) { Gfx.rect(px, py, T, 2, '#3a2c46'); Gfx.rect(px, py, T, 1, PAL.amber); }
+            if ((x + y) % 4 === 0) Gfx.rectA(px + 3, py + 5, T - 6, 1, '#4a3a56', 0.6);
+          } else if (style === 'grid') {
+            Gfx.rect(px, py, T, T, '#0e2440');
+            Gfx.rect(px + 1, py + 1, T - 2, T - 2, '#123055');
+            if (open) Gfx.rect(px, py, T, 1, PAL.hart);
+            Gfx.rectA(px, py, 1, T, '#123a6b', 0.8);
+          } else {
+            Gfx.rect(px, py, T, T, '#182640');
+            Gfx.rect(px + 1, py + 1, T - 2, T - 2, '#1f3352');
+            Gfx.rectA(px, py, 1, T, '#0c1424', 0.9);
+            if (open) { Gfx.rect(px, py, T, 2, '#3d5a86'); Gfx.rect(px, py, T, 1, PAL.hart); }
+            if ((x * 7 + y * 3) % 9 === 0) Gfx.rectA(px + 4, py + 6, 3, 3, PAL.hart, 0.4);
+          }
+        } else if (ch === '=') {
+          Gfx.rect(px, py, T, 4, style === 'grid' ? '#123a6b' : '#26364e');
+          Gfx.rect(px, py, T, 1, style === 'mumbai' ? PAL.amber : PAL.hart);
+          Gfx.rectA(px + 2, py + 4, T - 4, 1, '#000', 0.4);
+        } else if (ch === '^') {
+          // a live gantry: hard structure on top, arcing underneath
+          Gfx.rect(px, py, T, 3, '#39445a');
+          Gfx.rect(px, py + 3, T, 1, '#1b2331');
+          if ((x % 3) === 0) Gfx.rect(px + 6, py + 3, 3, 5, '#2b3547');
+          for (var s = 0; s < 3; s++) {
+            var a = t * 9 + x + s * 2;
+            var ax = px + 2 + s * 5 + Math.sin(a) * 1.5;
+            Gfx.rectA(ax, py + 5 + Math.sin(a * 1.7) * 2, 2, T - 7, PAL.raRed, 0.85);
+          }
+          Gfx.glow(px + T / 2, py + T / 2, 13, PAL.raRed, 0.25);
+        }
+      }
+    }
+  }
+
+  /* ---------- HUD ---------- */
+  function bar(x, y, w, h, pct, fill, back, label, labelColor) {
+    Gfx.rect(x - 1, y - 1, w + 2, h + 2, 'rgba(0,0,0,0.65)');
+    Gfx.rect(x, y, w, h, back || '#16202f');
+    var fw = Math.max(0, Math.round(w * C.clamp(pct, 0, 1)));
+    Gfx.rect(x, y, fw, h, fill);
+    Gfx.rectA(x, y, fw, 1, '#ffffff', 0.35);
+    if (label) Gfx.text(label, x, y - 9, { size: 8, color: labelColor || PAL.bone });
+  }
+
+  function drawHUD(game, world, player, boss) {
+    var pad = 10;
+    // integrity
+    bar(pad, pad + 10, 150, 8, player.hp / player.maxhp,
+        player.hp > 30 ? PAL.green : PAL.raRed, '#0e1a12', 'SYSTEM INTEGRITY');
+    // H.A.R.T.
+    bar(pad, pad + 32, 150, 6, player.hart / player.hartMax,
+        player.hartDetached ? PAL.steelLite : PAL.hart, '#0c1a24',
+        player.hartDetached ? 'H.A.R.T. DETACHED' : 'H.A.R.T.',
+        player.hartDetached ? PAL.amber : PAL.hart);
+    if (player.charge > 0.55) {
+      Gfx.text('CHARGED', pad + 156, pad + 31, { size: 8, color: PAL.hartGlow, glow: PAL.hart });
+    }
+
+    // score / lives
+    Gfx.text('SCORE ' + String(game.score).padStart(7, '0'), VW - pad, pad, { size: 9, align: 'right', color: PAL.gold });
+    Gfx.text('LUCIFER x' + game.lives, VW - pad, pad + 12, { size: 8, align: 'right', color: PAL.bone });
+    if (game.combo > 1) {
+      Gfx.text('x' + game.combo + ' COMBO', VW - pad, pad + 24, { size: 8, align: 'right', color: PAL.amber });
+    }
+
+    // level tag
+    Gfx.text(world.level.name + ' — ' + world.level.place, VW / 2, pad, { size: 8, align: 'center', color: PAL.steelLite });
+
+    // level 2 timer
+    if (world.level.timer) {
+      var left = Math.max(0, game.timeLeft);
+      var col = left < 20 ? PAL.raRed : PAL.white;
+      Gfx.text('CST IN ' + left.toFixed(1) + 's', VW / 2, pad + 12,
+        { size: 11, align: 'center', color: col, glow: left < 20 ? PAL.raRed : null });
+    }
+
+    // shards
+    Gfx.text('SHARDS ' + game.shardsFound + '/' + game.shardsTotal, pad, VH - 16, { size: 8, color: PAL.amber });
+
+    // boss bar
+    if (boss && !boss.dead && boss.intro <= 0) {
+      var bw = 300, bx = (VW - bw) / 2, by = VH - 40;
+      Gfx.text(boss.name, VW / 2, by - 22, { size: 11, align: 'center', color: PAL.raRed, glow: PAL.raRed });
+      Gfx.text(boss.sub || '', VW / 2, by - 10, { size: 7, align: 'center', color: PAL.steelLite });
+      bar(bx, by, bw, 7, boss.hp / boss.maxhp, PAL.raRed, '#20080c');
+      if (boss.phase === 1 && boss.guardMax) {
+        bar(bx, by + 11, bw, 4, boss.guard / boss.guardMax, PAL.steelLite, '#111820');
+      }
+      if (boss.immune && boss.invulnLabel) {
+        Gfx.text(boss.invulnLabel, VW / 2, by + 18, { size: 8, align: 'center', color: PAL.amber, glow: PAL.amber });
+      } else if (boss.invulnLabel && boss.phase === 3) {
+        Gfx.text(boss.invulnLabel, VW / 2, by + 18, { size: 8, align: 'center', color: PAL.gold });
+      }
+      if (boss.mimic) {
+        Gfx.text('MIMIC ACTIVE — BLOCKING ' + (boss.blockType === 'melee' ? 'MELEE' : 'BLAST') +
+                 ' — SWITCH ATTACK', VW / 2, by + 18, { size: 8, align: 'center', color: PAL.magenta });
+      }
+    }
+
+    // toasts
+    for (var i = 0; i < game.toasts.length; i++) {
+      var ts = game.toasts[i];
+      var a = C.clamp(ts.t / 0.6, 0, 1);
+      Gfx.text(ts.msg, VW / 2, 66 + i * 14, { size: 10, align: 'center', color: ts.color, alpha: a, glow: ts.color });
+    }
+
+    if (player.invertT > 0) {
+      Gfx.text('CONTROLS INVERTED', VW / 2, VH - 60, { size: 10, align: 'center', color: PAL.magenta, glow: PAL.magenta });
+    }
+    if (player.hartDetached) {
+      Gfx.rectA(0, 0, VW, VH, PAL.hartDeep, 0.05);
+      Gfx.text('RUNNING ON RESIDUAL CHARGE — [H] TO RECOVER YOUR H.A.R.T.',
+        VW / 2, 112, { size: 8, align: 'center', color: PAL.amber });
+    }
+  }
+
+  global.RA.hud = { Back: Back, scrim: scrim, drawTiles: drawTiles, drawHUD: drawHUD, bar: bar };
+})(window);
+
+/* ===== src/game/main.js ===== */
+/* =============================================================
+   game/main.js — state machine, rules glue, menus, the loop
+   ============================================================= */
+(function (global) {
+  'use strict';
+  var RA = global.RA, C = RA.core, Gfx = C.Gfx, PAL = C.PAL, T = C.TILE;
+  var Input = RA.Input, Audio = RA.Audio, ent = RA.ent, hud = RA.hud;
+  var VW = C.VIEW_W, VH = C.VIEW_H;
+  var STEP = 1 / 60, SAVE_KEY = 'raone.luciferprotocol.v1';
+
+  var Game = {
+    state: 'boot', prev: null, t: 0, stateT: 0,
+    score: 0, lives: 3, level: 0, combo: 1, comboT: 0,
+    world: null, player: null, boss: null,
+    toasts: [], timeLeft: 0, canDetach: false,
+    difficulty: 0,                       // 0 NORMAL, 1 LUCIFER
+    unlocked: {}, shardsFound: 0, shardsTotal: 0,
+    hi: 0, playerName: 'LUCIFER',
+    menuIdx: 0, codexCat: 0, codexIdx: 0, codexScroll: 0,
+    storyKey: 'intro', storyChars: 0, nextAfterStory: null,
+    respawnT: 0, clearT: 0, contT: 0, hitStop: 0,
+    bossActive: false, arenaLeft: 0, missTold: false,
+
+    /* ---------- save ---------- */
+    load: function () {
+      try {
+        var s = JSON.parse(global.localStorage.getItem(SAVE_KEY) || '{}');
+        this.hi = s.hi || 0;
+        this.unlocked = s.unlocked || {};
+        this.difficulty = s.difficulty || 0;
+        this.bestLevel = s.bestLevel || 0;
+      } catch (e) { /* private mode, no memory of past runs. fine. */ }
+      this.countShards();
+    },
+    save: function () {
+      try {
+        global.localStorage.setItem(SAVE_KEY, JSON.stringify({
+          hi: this.hi, unlocked: this.unlocked,
+          difficulty: this.difficulty, bestLevel: this.bestLevel || 0
+        }));
+      } catch (e) {}
+    },
+    countShards: function () {
+      var n = 0, f = 0;
+      for (var i = 0; i < RA.CODEX.length; i++) {
+        if (RA.CODEX[i].shard) { n++; if (this.unlocked[RA.CODEX[i].title]) f++; }
+      }
+      this.shardsTotal = n; this.shardsFound = f;
+    },
+    unlockShardByTitle: function (title) {
+      if (this.unlocked[title]) return false;
+      this.unlocked[title] = 1; this.countShards(); this.save();
+      Audio.sfx('codex');
+      this.toast('CODEX UNLOCKED — ' + title, PAL.gold);
+      return true;
+    },
+    unlockNextShard: function () {
+      for (var i = 0; i < RA.CODEX.length; i++) {
+        var e = RA.CODEX[i];
+        if (e.shard && !this.unlocked[e.title]) return this.unlockShardByTitle(e.title);
+      }
+      this.toast('ALL DATA SHARDS RECOVERED', PAL.gold);
+      return false;
+    },
+
+    /* ---------- helpers ---------- */
+    toast: function (msg, color) {
+      this.toasts.unshift({ msg: msg, color: color || PAL.white, t: 2.4 });
+      if (this.toasts.length > 3) this.toasts.pop();
+    },
+    addScore: function (n) {
+      this.score += Math.round(n * this.combo);
+      if (this.score > this.hi) this.hi = this.score;
+    },
+    bumpCombo: function () {
+      this.combo = Math.min(9, this.combo + 1); this.comboT = 3;
+    },
+    setState: function (s) { this.prev = this.state; this.state = s; this.stateT = 0; },
+
+    /* ---------- run control ---------- */
+    newRun: function () {
+      this.score = 0; this.lives = 3; this.level = 0; this.combo = 1;
+      this.startStory(RA.LEVELS[0].story, function () { Game.startLevel(0); });
+    },
+    startStory: function (key, next) {
+      this.storyKey = key; this.storyChars = 0; this.nextAfterStory = next;
+      this.setState('story');
+      Audio.play('title');
+    },
+    startLevel: function (i) {
+      this.level = i;
+      var lv = RA.LEVELS[i];
+      this.world = new ent.World(lv, this);
+      this.player = new ent.Player(this.world.spawnX, this.world.spawnY, this);
+      this.player.hartMax = lv.hartMax; this.player.hart = lv.hartMax;
+      if (this.difficulty === 1) { this.player.maxhp = 70; this.player.hp = 70; }
+      this.boss = null; this.bossActive = false;
+      this.canDetach = (lv.id === 3);
+      this.timeLeft = lv.timer || 0;
+      this.checkpoint = { x: this.world.spawnX, y: this.world.spawnY };
+      this.world.cam.follow(this.player, true);
+      this.arenaLeft = (lv.arenaX || 0) * T;
+      this.respawnT = 0; this.clearT = 0; this.missTold = false;
+      this.toasts.length = 0;
+      this.setState('play');
+      Audio.play(lv.music);
+      this.bestLevel = Math.max(this.bestLevel || 0, i); this.save();
+    },
+    respawn: function () {
+      var p = this.player, w = this.world;
+      p.dead = false; p.deathT = 0;
+      p.hp = p.maxhp; p.hart = p.hartMax;
+      p.hartDetached = false; p.hartObj = null;
+      p.invuln = 2.0; p.vx = p.vy = 0; p.invertT = 0;
+      p.x = this.checkpoint.x; p.y = this.checkpoint.y;
+      this.combo = 1;
+      if (this.world.level.timer) this.timeLeft = Math.max(this.timeLeft, 45);
+      if (this.bossActive && this.boss && !this.boss.dead) {
+        // he does not get to keep his progress either
+        this.boss.hp = Math.min(this.boss.maxhp, this.boss.hp + this.boss.maxhp * 0.15);
+      }
+      w.cam.follow(p, true);
+      Audio.play(this.world.level.music);
+    },
+
+    /* ---------- boot ---------- */
+    init: function (canvas) {
+      Gfx.init(canvas);
+      Input.init(canvas);
+      this.load();
+      var self = this;
+      global.addEventListener('pointerdown', function () { Audio.resume(); });
+      global.addEventListener('keydown', function () { Audio.resume(); }, { once: true });
+      var last = performance.now(), acc = 0;
+      function frame(now) {
+        var dt = Math.min(0.1, (now - last) / 1000); last = now;
+        acc += dt;
+        var guard = 0;
+        while (acc >= STEP && guard++ < 5) { self.update(STEP); acc -= STEP; }
+        self.draw();
+        Input.endFrame();
+        requestAnimationFrame(frame);
+      }
+      requestAnimationFrame(frame);
+    },
+
+    /* ---------- update ---------- */
+    update: function (dt) {
+      this.t += dt; this.stateT += dt;
+      Gfx.updateFx(dt);
+      for (var i = this.toasts.length - 1; i >= 0; i--) {
+        this.toasts[i].t -= dt;
+        if (this.toasts[i].t <= 0) this.toasts.splice(i, 1);
+      }
+      if (this.comboT > 0) { this.comboT -= dt; if (this.comboT <= 0) this.combo = 1; }
+      if (Input.pressed('mute')) { Audio.toggleMute(); this.toast(Audio.muted ? 'SOUND OFF' : 'SOUND ON', PAL.steelLite); }
+
+      switch (this.state) {
+        case 'boot':     this.upBoot(dt); break;
+        case 'title':    this.upTitle(dt); break;
+        case 'codex':    this.upCodex(dt); break;
+        case 'controls': if (Input.anyStart() || Input.pressed('pause')) { Audio.sfx('select'); this.setState('title'); } break;
+        case 'story':    this.upStory(dt); break;
+        case 'play':     this.upPlay(dt); break;
+        case 'pause':    this.upPause(dt); break;
+        case 'clear':    this.upClear(dt); break;
+        case 'gameover': this.upGameOver(dt); break;
+        case 'ending':   this.upEnding(dt); break;
+        case 'credits':  if (this.stateT > 1 && Input.anyStart()) { Audio.sfx('select'); this.setState('title'); Audio.play('title'); } break;
+      }
+    },
+
+    upBoot: function (dt) {
+      if (Input.anyPressed || Input.anyStart()) {
+        Audio.resume(); Audio.sfx('select'); Audio.play('title');
+        this.setState('title');
+      }
+    },
+
+    upTitle: function (dt) {
+      var items = 5;
+      if (Input.pressed('up')) { this.menuIdx = (this.menuIdx + items - 1) % items; Audio.sfx('menu'); }
+      if (Input.pressed('down')) { this.menuIdx = (this.menuIdx + 1) % items; Audio.sfx('menu'); }
+      if (Input.pressed('left') || Input.pressed('right')) {
+        if (this.menuIdx === 2) { this.difficulty ^= 1; Audio.sfx('menu'); this.save(); }
+      }
+      if (Input.anyStart()) {
+        Audio.sfx('select');
+        switch (this.menuIdx) {
+          case 0: this.newRun(); break;
+          case 1: this.codexCat = 0; this.codexIdx = 0; this.setState('codex'); break;
+          case 2: this.difficulty ^= 1; this.save(); break;
+          case 3: this.setState('controls'); break;
+          case 4: Audio.toggleMute(); break;
+        }
+      }
+      if (Input.pressed('codex')) { Audio.sfx('select'); this.setState('codex'); }
+    },
+
+    codexCats: function () {
+      var cats = [], seen = {};
+      for (var i = 0; i < RA.CODEX.length; i++) {
+        if (!seen[RA.CODEX[i].cat]) { seen[RA.CODEX[i].cat] = 1; cats.push(RA.CODEX[i].cat); }
+      }
+      return cats;
+    },
+    codexList: function () {
+      var cat = this.codexCats()[this.codexCat], out = [];
+      for (var i = 0; i < RA.CODEX.length; i++) if (RA.CODEX[i].cat === cat) out.push(RA.CODEX[i]);
+      return out;
+    },
+    upCodex: function (dt) {
+      var cats = this.codexCats(), list = this.codexList();
+      if (Input.pressed('left')) { this.codexCat = (this.codexCat + cats.length - 1) % cats.length; this.codexIdx = 0; Audio.sfx('menu'); }
+      if (Input.pressed('right')) { this.codexCat = (this.codexCat + 1) % cats.length; this.codexIdx = 0; Audio.sfx('menu'); }
+      if (Input.pressed('up')) { this.codexIdx = (this.codexIdx + list.length - 1) % list.length; Audio.sfx('menu'); }
+      if (Input.pressed('down')) { this.codexIdx = (this.codexIdx + 1) % list.length; Audio.sfx('menu'); }
+      if (Input.pressed('pause') || Input.pressed('codex')) { Audio.sfx('select'); this.setState('title'); }
+    },
+
+    upStory: function (dt) {
+      var s = RA.STORY[this.storyKey];
+      var total = s.lines.join('\n').length;
+      this.storyChars += dt * 130;
+      if (Input.anyStart()) {
+        if (this.storyChars < total) { this.storyChars = total; Audio.sfx('menu'); }
+        else {
+          Audio.sfx('select');
+          var n = this.nextAfterStory; this.nextAfterStory = null;
+          if (n) n();
+        }
+      }
+    },
+
+    upPause: function (dt) {
+      if (Input.pressed('pause') || Input.pressed('start')) { Audio.sfx('select'); this.setState('play'); }
+      if (Input.pressed('codex')) { Audio.sfx('select'); this.setState('codex'); }
+    },
+
+    upClear: function (dt) {
+      this.clearT += dt;
+      if (this.clearT > 1.6 && Input.anyStart()) {
+        Audio.sfx('select');
+        var nxt = this.level + 1;
+        if (nxt < RA.LEVELS.length) {
+          var self = this;
+          this.startStory(RA.LEVELS[nxt].story, function () { self.startLevel(nxt); });
+        } else {
+          this.startStory('win', function () { Game.setState('ending'); Audio.play('ending'); });
+        }
+      }
+    },
+
+    upGameOver: function (dt) {
+      this.contT -= dt;
+      if (Input.anyStart() && this.contT > 0) {
+        Audio.sfx('levelup');
+        this.lives = 3;
+        this.startLevel(this.level);
+      } else if (this.contT <= 0 && (Input.anyStart() || this.stateT > 14)) {
+        this.save();
+        this.setState('title'); Audio.play('title');
+      }
+    },
+
+    upEnding: function (dt) {
+      if (this.stateT > 2.5 && Input.anyStart()) {
+        Audio.sfx('select');
+        this.startStory('epilogue', function () { Game.setState('credits'); });
+      }
+    },
+
+    /* =========================================================
+       PLAY
+       ========================================================= */
+    upPlay: function (dt) {
+      var w = this.world, p = this.player, lv = w.level;
+      if (Input.pressed('pause')) { Audio.sfx('select'); this.setState('pause'); return; }
+      if (this.hitStop > 0) { this.hitStop -= dt; return; }
+      w.time += dt;
+
+      /* --- death / respawn --- */
+      if (p.dead) {
+        this.respawnT += dt;
+        p.update(dt, w, Input, false);
+        w.parts.update(dt);
+        w.cam.follow(p, false);
+        if (this.respawnT > 2.2) {
+          this.respawnT = 0;
+          this.lives--;
+          if (this.lives <= 0) {
+            this.contT = 9.99;
+            this.setState('gameover');
+            Audio.stop();
+            if (this.score > this.hi) { this.hi = this.score; }
+            this.save();
+          } else this.respawn();
+        }
+        return;
+      }
+
+      /* --- the runaway local --- */
+      if (lv.timer) {
+        this.timeLeft -= dt;
+        if (this.timeLeft <= 0) {
+          this.timeLeft = 0;
+          this.toast('THE TRAIN REACHED CST', PAL.raRed);
+          p.hurt(9999, w, 0);
+          return;
+        }
+      }
+
+      /* --- boss gate --- */
+      if (!this.bossActive && p.x > w.bossGateX && lv.boss) {
+        this.bossActive = true;
+        this.boss = RA.bosses.make(lv.boss, w.bossSpawnX, 40, lv, this);
+        // drop him onto the arena floor
+        var by = 0;
+        while (by < w.h && !w.isSolid(Math.floor(w.bossSpawnX / T), by)) by++;
+        this.boss.y = by * T - this.boss.h - 1;
+        Audio.play('boss');
+        Audio.sfx('bossroar');
+        Gfx.flash(PAL.raRed, 0.5, 0.5);
+        this.toast('RA.ONE HAS ENTERED THE LEVEL', PAL.raRed);
+      }
+
+      /* --- player --- */
+      p.update(dt, w, Input, true);
+      if (p.hartObj) p.updateHart(dt, w);
+
+      /* --- the train sets a floor on your pace, not a ceiling --- */
+      if (lv.autoScroll && !this.bossActive) {
+        var follow = C.clamp(p.cx() - VW / 2, 0, Math.max(0, w.pxW - VW));
+        w.cam.x = Math.min(Math.max(0, w.pxW - VW),
+                           Math.max(w.cam.x + lv.autoScroll * (dt / STEP), follow));
+        w.cam.y = C.lerp(w.cam.y, C.clamp(p.y - VH / 2 + 20, 0, Math.max(0, w.pxH - VH)), 0.06);
+        if (p.x < w.cam.x + 6) {
+          p.x = w.cam.x + 6;
+          if (Math.floor(this.t * 3) % 2 === 0) p.hurt(6, w, 1);
+        }
+      } else {
+        w.cam.follow(p, false);
+      }
+
+      /* --- arena lock --- */
+      if (this.bossActive) {
+        var right = Math.min(w.pxW, this.arenaLeft + Math.max(VW, 40 * T));
+        w.cam.x = C.clamp(w.cam.x, this.arenaLeft, Math.max(this.arenaLeft, right - VW));
+        if (p.x < this.arenaLeft + 4) { p.x = this.arenaLeft + 4; p.vx = Math.max(0, p.vx); }
+      }
+
+      /* --- actors --- */
+      var i, a;
+      for (i = w.actors.length - 1; i >= 0; i--) {
+        a = w.actors[i];
+        if (Math.abs(a.cx() - p.cx()) > VW * 1.4) continue;   // sleep off-screen
+        a.update(dt, w, p);
+        if (a.remove) { w.actors.splice(i, 1); this.bumpCombo(); continue; }
+        if (C.aabb(a, p) && !p.dead) {
+          var dmg = (a.type === 'drone' && a.diveT > 0) ? 10 : 7;
+          p.hurt(dmg * (this.difficulty ? 1.4 : 1), w, a.cx() < p.cx() ? 1 : -1);
+        }
+      }
+
+      /* --- boss --- */
+      var b = this.boss;
+      if (b && !b.dead) {
+        b.update(dt, w, p);
+        if (b.phase !== 3 && b.intro <= 0 && C.aabb(b, p) && !p.dead) {
+          p.hurt(b.contact * (this.difficulty ? 1.4 : 1), w, b.cx() < p.cx() ? 1 : -1);
+        }
+        if (b.phase === 3) {
+          var cbs = b.cloneBoxes();
+          for (i = 0; i < cbs.length; i++) {
+            if (C.aabb(cbs[i], p) && !p.dead) p.hurt(8, w, cbs[i].x < p.cx() ? 1 : -1);
+          }
+        }
+      } else if (b && b.dead) {
+        b.deadT = (b.deadT || 0) + dt;
+        if (b.deadT > 2.4 && this.state === 'play') {
+          this.addScore(2000 + this.lives * 500 + Math.round(p.hp) * 10);
+          this.clearT = 0;
+          this.setState('clear');
+          Audio.play('title');
+          Audio.sfx('levelup');
+          this.save();
+          return;
+        }
+      }
+
+      /* --- melee hitbox --- */
+      if (p.hitBox) {
+        var hb = p.hitBox;
+        for (i = 0; i < w.actors.length; i++) {
+          a = w.actors[i];
+          if (hb.hit.indexOf(a) >= 0) continue;
+          if (C.aabb(hb, a)) {
+            hb.hit.push(a);
+            a.damage(hb.dmg * (this.difficulty ? 0.85 : 1), w, p.face);
+            this.hitStop = 0.045; Gfx.shake(1.5, 0.1);
+            w.parts.burst(a.cx(), a.cy(), 8, { color: PAL.white, glow: true, smax: 2.5 });
+          }
+        }
+        if (b && !b.dead && b.intro <= 0) {
+          if (b.phase === 3) {
+            var boxes = b.cloneBoxes();
+            for (i = 0; i < boxes.length; i++) {
+              if (hb.hit.indexOf('c' + boxes[i].idx) >= 0) continue;
+              if (C.aabb(hb, boxes[i])) {
+                hb.hit.push('c' + boxes[i].idx);
+                b.hitClone(boxes[i].idx, hb.dmg, w, p);
+                this.hitStop = 0.06;
+              }
+            }
+          } else if (hb.hit.indexOf(b) < 0 && C.aabb(hb, b)) {
+            hb.hit.push(b);
+            b.damage(hb.dmg, w, p.face, 'melee');
+            this.hitStop = 0.06; Gfx.shake(2, 0.12);
+          }
+        }
+      }
+
+      /* --- shots --- */
+      for (i = w.shots.length - 1; i >= 0; i--) {
+        var s = w.shots[i];
+        s.update(dt, w, p);
+        var sBox = { x: s.x, y: s.y, w: s.w, h: s.h };
+
+        if (s.owner === 'player') {
+          for (var j = 0; j < w.actors.length; j++) {
+            a = w.actors[j];
+            if (s.hitList.indexOf(a) >= 0) continue;
+            if (C.aabb(sBox, a)) {
+              s.hitList.push(a);
+              a.damage(s.dmg, w, s.vx > 0 ? 1 : -1);
+              w.parts.burst(s.x, s.y, 8, { color: s.color, glow: true });
+              if (!s.pierce) { s.remove = true; break; }
+            }
+          }
+          if (b && !b.dead && b.intro <= 0 && !s.remove) {
+            if (b.phase === 3) {
+              var bx2 = b.cloneBoxes();
+              for (j = 0; j < bx2.length; j++) {
+                if (s.hitList.indexOf('c' + bx2[j].idx) >= 0) continue;
+                if (C.aabb(sBox, bx2[j])) {
+                  s.hitList.push('c' + bx2[j].idx);
+                  b.hitClone(bx2[j].idx, s.dmg, w, p);
+                  if (!s.pierce) s.remove = true;
+                  break;
+                }
+              }
+            } else if (s.hitList.indexOf(b) < 0 && C.aabb(sBox, b)) {
+              s.hitList.push(b);
+              b.damage(s.dmg, w, s.vx > 0 ? 1 : -1, 'blast');
+              w.parts.burst(s.x, s.y, 10, { color: s.color, glow: true });
+              if (!s.pierce) s.remove = true;
+            }
+          }
+        } else if (!p.dead && C.aabb(sBox, p)) {
+          /* ===== THE RULE OF THE THIRD LEVEL ===== */
+          if (s.antiHart) {
+            s.remove = true;
+            if (p.hartDetached) {
+              // the one bullet, spent on a body it cannot kill
+              Gfx.flash('#ffffff', 0.8, 0.6); Gfx.shake(6, 0.7);
+              this.toast('THE BULLET PASSED THROUGH. IT IS SPENT.', PAL.gold);
+              this.addScore(3000);
+              if (b && b.enterPhase3) b.enterPhase3(w);
+            } else {
+              this.toast('IT ONLY KILLS A H.A.R.T. THAT IS ATTACHED', PAL.raRed);
+              p.hurt(9999, w, s.vx > 0 ? 1 : -1);
+            }
+          } else if (p.invuln <= 0) {
+            s.remove = true;
+            p.hurt(s.dmg * (this.difficulty ? 1.4 : 1), w, s.vx > 0 ? 1 : -1);
+          }
+        }
+        if (s.remove) {
+          if (s.antiHart && s.life <= 0 && b && b.phase === 2 && !this.missTold) {
+            this.missTold = true;
+            this.toast('HE RECALLS THE ROUND. HE HAS ALL NIGHT.', PAL.steelLite);
+          }
+          w.shots.splice(i, 1);
+        }
+      }
+
+      /* --- pickups --- */
+      for (i = w.pickups.length - 1; i >= 0; i--) {
+        var pk = w.pickups[i];
+        pk.update(dt);
+        if (C.aabb(pk, p)) {
+          if (pk.kind === 'hart') {
+            p.hart = Math.min(p.hartMax, p.hart + 30); this.addScore(50); Audio.sfx('pickup');
+          } else if (pk.kind === 'repair') {
+            p.hp = Math.min(p.maxhp, p.hp + 28); this.addScore(80); Audio.sfx('pickup');
+          } else {
+            this.addScore(500); this.unlockNextShard();
+          }
+          w.parts.burst(pk.x + 6, pk.y + 6, 12, { color: PAL.gold, glow: true });
+          w.pickups.splice(i, 1);
+        }
+      }
+
+      /* --- checkpoints --- */
+      for (i = 0; i < w.checkpoints.length; i++) {
+        var cp = w.checkpoints[i];
+        if (!cp.taken && Math.abs(p.cx() - cp.x) < 20 && Math.abs(p.cy() - cp.y) < 40) {
+          cp.taken = true;
+          this.checkpoint = { x: cp.x, y: cp.y - 8 };
+          this.toast('CHECKPOINT', PAL.hart);
+          Audio.sfx('pickup');
+        }
+      }
+
+      w.parts.update(dt);
+    },
+
+    /* =========================================================
+       DRAW
+       ========================================================= */
+    draw: function () {
+      Gfx.begin();
+      switch (this.state) {
+        case 'boot': this.drawBoot(); break;
+        case 'title': this.drawTitle(); break;
+        case 'codex': this.drawCodex(); break;
+        case 'controls': this.drawControls(); break;
+        case 'story': this.drawStory(); break;
+        case 'play': this.drawPlay(); break;
+        case 'pause': this.drawPlay(); this.drawPause(); break;
+        case 'clear': this.drawPlay(); this.drawClear(); break;
+        case 'gameover': this.drawPlay(); this.drawGameOver(); break;
+        case 'ending': this.drawEnding(); break;
+        case 'credits': this.drawCredits(); break;
+      }
+      Gfx.end();
+    },
+
+    drawPlay: function () {
+      var w = this.world, p = this.player, cam = w.cam;
+      hud.Back[w.level.bg](cam, this.t);
+      hud.scrim(w.level.bg);
+      hud.drawTiles(w, cam, this.t);
+
+      for (var i = 0; i < w.pickups.length; i++) w.pickups[i].draw(cam);
+      for (i = 0; i < w.checkpoints.length; i++) {
+        var cp = w.checkpoints[i];
+        var cxp = Math.round(cp.x - cam.x), cyp = Math.round(cp.y - cam.y);
+        Gfx.rectA(cxp - 1, cyp - 22, 2, 24, cp.taken ? PAL.hart : PAL.steel, 0.9);
+        if (cp.taken) Gfx.glow(cxp, cyp - 20, 10, PAL.hart, 0.4);
+      }
+      for (i = 0; i < w.actors.length; i++) {
+        var a = w.actors[i];
+        if (Math.abs(a.cx() - cam.x - VW / 2) < VW) a.draw(cam);
+      }
+      if (this.boss && !this.boss.dead) this.boss.draw(cam, p);
+      p.drawHart(cam, w);
+      p.draw(cam);
+      for (i = 0; i < w.shots.length; i++) w.shots[i].draw(cam);
+      w.parts.draw(cam);
+
+      // level 3 arena veil
+      if (w.level.bg === 'grid') Gfx.rectA(0, 0, VW, VH, '#0a1a2e', 0.10);
+
+      hud.drawHUD(this, w, p, this.boss);
+
+      if (this.boss && this.boss.intro > 0) {
+        var a2 = C.clamp(this.boss.intro, 0, 1);
+        Gfx.text(this.boss.name, VW / 2, VH / 2 - 30,
+          { size: 30, align: 'center', color: PAL.raRed, glow: PAL.raRed, alpha: a2 });
+        Gfx.text(this.boss.sub, VW / 2, VH / 2 + 6,
+          { size: 10, align: 'center', color: PAL.bone, alpha: a2 });
+      }
+    },
+
+    /* ---------- screens ---------- */
+    logo: function (cx, cy, big) {
+      var s = big ? 58 : 34;
+      var jitter = (Math.random() < 0.06) ? C.rand(-3, 3) : 0;
+      Gfx.text('RA.ONE', cx + jitter, cy, { size: s, align: 'center', color: PAL.raRed, glow: PAL.raRed });
+      Gfx.text('RA.ONE', cx - jitter * 0.6, cy, { size: s, align: 'center', color: PAL.white, alpha: 0.85, shadow: false });
+      Gfx.text('L U C I F E R   P R O T O C O L', cx, cy + s + 4,
+        { size: big ? 12 : 9, align: 'center', color: PAL.hart, glow: PAL.hart });
+    },
+
+    drawBoot: function () {
+      Gfx.rect(0, 0, VW, VH, '#020307');
+      var lines = [
+        'BARRON INDUSTRIES / LONDON',
+        'H.A.R.T. RUNTIME v1.0 ................ OK',
+        'RANDOM ACCESS CORE ................... OK',
+        'MOTION CAPTURE (A. AKASHI) ........... OK',
+        'AVATAR: G.ONE ........................ OK',
+        'AVATAR: RA.ONE ....................... WARNING',
+        '  > antagonist exceeds protagonist',
+        '  > this is intentional',
+        'PLAYER PROFILE ....................... LUCIFER'
+      ];
+      var n = Math.min(lines.length, Math.floor(this.stateT * 3.2));
+      for (var i = 0; i < n; i++) {
+        Gfx.text(lines[i], 40, 60 + i * 16,
+          { size: 10, color: i === 5 ? PAL.amber : (i === 6 || i === 7 ? PAL.steelLite : PAL.green) });
+      }
+      if (this.stateT > 3 && Math.floor(this.t * 2) % 2 === 0) {
+        Gfx.text('PRESS ANY KEY', VW / 2, VH - 60, { size: 12, align: 'center', color: PAL.white });
+      }
+      Gfx.text('AN UNOFFICIAL FAN TRIBUTE TO RA.ONE (2011)', VW / 2, VH - 24,
+        { size: 7, align: 'center', color: PAL.steel });
+    },
+
+    drawTitle: function () {
+      hud.Back.grid({ x: this.t * 30, y: 0 }, this.t);
+      Gfx.rectA(0, 0, VW, VH, '#02030a', 0.45);
+      this.logo(VW / 2, 42, true);
+
+      var items = [
+        'START GAME',
+        'CODEX  (' + this.shardsFound + '/' + this.shardsTotal + ' SHARDS)',
+        'DIFFICULTY:  ' + (this.difficulty ? 'LUCIFER' : 'NORMAL'),
+        'CONTROLS',
+        'SOUND:  ' + (Audio.muted ? 'OFF' : 'ON')
+      ];
+      for (var i = 0; i < items.length; i++) {
+        var sel = i === this.menuIdx;
+        var y = 168 + i * 22;
+        if (sel) {
+          Gfx.rectA(VW / 2 - 150, y - 4, 300, 18, PAL.hart, 0.12);
+          Gfx.text('>', VW / 2 - 146, y, { size: 12, color: PAL.hart });
+        }
+        Gfx.text(items[i], VW / 2, y,
+          { size: 12, align: 'center', color: sel ? PAL.white : PAL.steelLite, glow: sel ? PAL.hart : null });
+      }
+      Gfx.text('HI-SCORE ' + String(this.hi).padStart(7, '0'), VW / 2, VH - 44,
+        { size: 9, align: 'center', color: PAL.gold });
+      Gfx.text('UNOFFICIAL FAN TRIBUTE — NO FILM ASSETS USED — ALL ART DRAWN IN CODE',
+        VW / 2, VH - 22, { size: 7, align: 'center', color: PAL.steel });
+    },
+
+    drawControls: function () {
+      Gfx.rect(0, 0, VW, VH, '#04060e');
+      Gfx.text('CONTROLS', VW / 2, 26, { size: 20, align: 'center', color: PAL.hart, glow: PAL.hart });
+      var rows = [
+        ['MOVE', 'ARROWS  /  A D'],
+        ['JUMP  (double)', 'SPACE  /  Z'],
+        ['MELEE  (3-hit combo)', 'X  /  J'],
+        ['H.A.R.T. BLAST', 'C  /  K   (hold = charged beam)'],
+        ['DASH', 'SHIFT  /  L'],
+        ['DETACH H.A.R.T.', 'H     (level 3 only)'],
+        ['DROP THROUGH', 'DOWN + JUMP'],
+        ['PAUSE', 'ESC  /  P'],
+        ['CODEX', 'TAB'],
+        ['MUTE', 'M']
+      ];
+      for (var i = 0; i < rows.length; i++) {
+        Gfx.text(rows[i][0], 90, 66 + i * 22, { size: 10, color: PAL.bone });
+        Gfx.text(rows[i][1], VW - 90, 66 + i * 22, { size: 10, align: 'right', color: PAL.hart });
+      }
+      Gfx.text('PRESS ENTER TO GO BACK', VW / 2, VH - 26, { size: 9, align: 'center', color: PAL.steelLite });
+    },
+
+    drawCodex: function () {
+      Gfx.rect(0, 0, VW, VH, '#04060e');
+      hud.Back.grid({ x: this.t * 12, y: 0 }, this.t * 0.4);
+      Gfx.rectA(0, 0, VW, VH, '#02030a', 0.72);
+
+      var cats = this.codexCats(), list = this.codexList();
+      Gfx.text('CODEX', 20, 16, { size: 18, color: PAL.hart, glow: PAL.hart });
+      Gfx.text('DATA SHARDS ' + this.shardsFound + '/' + this.shardsTotal, VW - 20, 20,
+        { size: 9, align: 'right', color: PAL.gold });
+
+      var cx = 20;
+      for (var i = 0; i < cats.length; i++) {
+        var on = i === this.codexCat;
+        var wdt = Gfx.textWidth(cats[i], 9) + 16;
+        if (on) Gfx.rectA(cx - 6, 40, wdt, 15, PAL.hart, 0.2);
+        Gfx.text(cats[i], cx, 43, { size: 9, color: on ? PAL.white : PAL.steel });
+        cx += wdt + 6;
+      }
+      Gfx.rectA(20, 60, VW - 40, 1, PAL.steel, 0.6);
+
+      // list
+      var top = 72;
+      for (i = 0; i < list.length; i++) {
+        var e = list[i], sel = i === this.codexIdx;
+        var locked = e.shard && !this.unlocked[e.title];
+        var y = top + i * 15;
+        if (sel) Gfx.rectA(16, y - 3, 210, 14, PAL.hart, 0.14);
+        Gfx.text(locked ? '??? LOCKED SHARD' : e.title, 22, y,
+          { size: 8, color: locked ? PAL.steel : (sel ? PAL.white : PAL.bone) });
+      }
+
+      // detail
+      var sel2 = list[this.codexIdx];
+      Gfx.rectA(236, 68, VW - 256, VH - 100, '#060b16', 0.9);
+      Gfx.rectA(236, 68, VW - 256, 1, PAL.hart, 0.5);
+      if (sel2) {
+        var lockd = sel2.shard && !this.unlocked[sel2.title];
+        if (lockd) {
+          Gfx.text('LOCKED', 250, 82, { size: 12, color: PAL.amber });
+          var lw = Gfx.wrap('This entry is sealed behind a DATA SHARD. Find it in a level ' +
+                            'and it opens. The film is in here — you just have to go and get it.', 9, VW - 290);
+          for (i = 0; i < lw.length; i++) Gfx.text(lw[i], 250, 106 + i * 14, { size: 9, color: PAL.steelLite });
+        } else {
+          Gfx.text(sel2.title, 250, 80, { size: 11, color: PAL.hart, glow: PAL.hart });
+          var lines = Gfx.wrap(sel2.body, 9, VW - 292);
+          for (i = 0; i < lines.length; i++) {
+            Gfx.text(lines[i], 250, 104 + i * 14, { size: 9, color: PAL.bone });
+          }
+        }
+      }
+      Gfx.text('ARROWS NAVIGATE   ESC BACK', VW / 2, VH - 20, { size: 8, align: 'center', color: PAL.steel });
+    },
+
+    drawStory: function () {
+      Gfx.rect(0, 0, VW, VH, '#03040a');
+      var s = RA.STORY[this.storyKey];
+      // faint scan of the level colour behind the words
+      Gfx.rectA(0, 0, VW, VH, PAL.deep, 0.5);
+      Gfx.text(s.title, VW / 2, 44, { size: 16, align: 'center', color: PAL.raRed, glow: PAL.raRed });
+      Gfx.rectA(VW / 2 - 150, 66, 300, 1, PAL.steel, 0.7);
+
+      var shown = Math.floor(this.storyChars), used = 0;
+      for (var i = 0; i < s.lines.length; i++) {
+        var ln = s.lines[i];
+        if (used > shown) break;
+        var vis = ln.substring(0, Math.max(0, shown - used));
+        Gfx.text(vis, VW / 2, 92 + i * 18, { size: 11, align: 'center', color: PAL.bone });
+        used += ln.length + 1;
+      }
+      if (Math.floor(this.t * 2) % 2 === 0) {
+        Gfx.text('PRESS ENTER', VW / 2, VH - 30, { size: 10, align: 'center', color: PAL.hart });
+      }
+    },
+
+    drawPause: function () {
+      Gfx.rectA(0, 0, VW, VH, '#000', 0.72);
+      Gfx.text('PAUSED', VW / 2, 100, { size: 28, align: 'center', color: PAL.hart, glow: PAL.hart });
+      Gfx.text('ENTER — RESUME     TAB — CODEX     M — SOUND', VW / 2, 150,
+        { size: 10, align: 'center', color: PAL.bone });
+      Gfx.text('SCORE ' + this.score + '     SHARDS ' + this.shardsFound + '/' + this.shardsTotal,
+        VW / 2, 176, { size: 9, align: 'center', color: PAL.gold });
+    },
+
+    drawClear: function () {
+      Gfx.rectA(0, 0, VW, VH, '#000', 0.75);
+      var lv = RA.LEVELS[this.level];
+      Gfx.text(lv.name + ' CLEAR', VW / 2, 96, { size: 26, align: 'center', color: PAL.gold, glow: PAL.gold });
+      Gfx.text(lv.place, VW / 2, 130, { size: 10, align: 'center', color: PAL.bone });
+      Gfx.text('SCORE  ' + String(this.score).padStart(7, '0'), VW / 2, 164,
+        { size: 12, align: 'center', color: PAL.white });
+      Gfx.text('SHARDS ' + this.shardsFound + '/' + this.shardsTotal, VW / 2, 186,
+        { size: 10, align: 'center', color: PAL.amber });
+      if (this.clearT > 1.6 && Math.floor(this.t * 2) % 2 === 0) {
+        Gfx.text('PRESS ENTER', VW / 2, 228, { size: 11, align: 'center', color: PAL.hart });
+      }
+    },
+
+    drawGameOver: function () {
+      Gfx.rectA(0, 0, VW, VH, '#12010a', 0.85);
+      Gfx.text('GAME OVER', VW / 2, 86, { size: 34, align: 'center', color: PAL.raRed, glow: PAL.raRed });
+      Gfx.text('RA.ONE DOES NOT ACCEPT AN UNFINISHED TURN', VW / 2, 130,
+        { size: 9, align: 'center', color: PAL.bone });
+      if (this.contT > 0) {
+        Gfx.text('CONTINUE?', VW / 2, 168, { size: 18, align: 'center', color: PAL.white });
+        Gfx.text(Math.max(0, Math.ceil(this.contT)).toString(), VW / 2, 196,
+          { size: 26, align: 'center', color: PAL.amber, glow: PAL.amber });
+        Gfx.text('PRESS ENTER', VW / 2, 232, { size: 10, align: 'center', color: PAL.hart });
+      } else {
+        Gfx.text('SCORE ' + String(this.score).padStart(7, '0'), VW / 2, 180,
+          { size: 12, align: 'center', color: PAL.gold });
+      }
+    },
+
+    drawEnding: function () {
+      Gfx.rect(0, 0, VW, VH, '#03040a');
+      var t = this.stateT;
+      // the H.A.R.T., left behind on an empty floor
+      var pulse = 0.6 + 0.4 * Math.sin(t * 2.2);
+      Gfx.rectA(0, VH - 90, VW, 90, '#080d18', 1);
+      Gfx.rectA(0, VH - 90, VW, 1, PAL.steel, 0.6);
+      var hx = VW / 2, hy = VH - 120;
+      Gfx.glow(hx, hy, 40 + pulse * 22, PAL.hart, 0.55);
+      Gfx.rect(hx - 3, hy - 10, 6, 20, PAL.hart);
+      Gfx.rect(hx - 10, hy - 3, 20, 6, PAL.hart);
+      Gfx.rect(hx - 4, hy - 4, 8, 8, PAL.hartGlow);
+      Gfx.ring(hx, hy, 26 + pulse * 8, PAL.hart, 1, 0.45);
+      for (var i = 0; i < 10; i++) {
+        var a = t * 0.8 + i * 0.63, r = 40 + Math.sin(t + i) * 14;
+        Gfx.rectA(hx + Math.cos(a) * r, hy + Math.sin(a) * r * 0.5, 2, 2, PAL.hartGlow, 0.6);
+      }
+      Gfx.text('THE BODY GOES BACK TO THE VIRTUAL WORLD.', VW / 2, 60,
+        { size: 11, align: 'center', color: PAL.bone, alpha: C.clamp(t - 0.4, 0, 1) });
+      Gfx.text('THE H.A.R.T. STAYS BEHIND.', VW / 2, 82,
+        { size: 11, align: 'center', color: PAL.hart, glow: PAL.hart, alpha: C.clamp(t - 1.4, 0, 1) });
+      if (t > 2.5 && Math.floor(this.t * 2) % 2 === 0) {
+        Gfx.text('PRESS ENTER', VW / 2, VH - 34, { size: 10, align: 'center', color: PAL.white });
+      }
+    },
+
+    drawCredits: function () {
+      Gfx.rect(0, 0, VW, VH, '#03040a');
+      hud.Back.grid({ x: this.t * 20, y: 0 }, this.t * 0.5);
+      Gfx.rectA(0, 0, VW, VH, '#02030a', 0.7);
+      this.logo(VW / 2, 26, false);
+      var rows = [
+        ['FINAL SCORE', String(this.score)],
+        ['HI-SCORE', String(this.hi)],
+        ['DATA SHARDS', this.shardsFound + ' / ' + this.shardsTotal],
+        ['DIFFICULTY', this.difficulty ? 'LUCIFER' : 'NORMAL']
+      ];
+      for (var i = 0; i < rows.length; i++) {
+        Gfx.text(rows[i][0], VW / 2 - 130, 120 + i * 20, { size: 10, color: PAL.steelLite });
+        Gfx.text(rows[i][1], VW / 2 + 130, 120 + i * 20, { size: 10, align: 'right', color: PAL.gold });
+      }
+      Gfx.text('INSPIRED BY RA.ONE (2011) — DIR. ANUBHAV SINHA', VW / 2, VH - 60,
+        { size: 8, align: 'center', color: PAL.bone });
+      Gfx.text('UNOFFICIAL FAN TRIBUTE. NOT AFFILIATED WITH THE RIGHTS HOLDERS.', VW / 2, VH - 44,
+        { size: 7, align: 'center', color: PAL.steel });
+      if (Math.floor(this.t * 2) % 2 === 0) {
+        Gfx.text('PRESS ENTER', VW / 2, VH - 22, { size: 9, align: 'center', color: PAL.hart });
+      }
+    }
+  };
+
+  global.RA.Game = Game;
+  global.addEventListener('load', function () {
+    Game.init(document.getElementById('screen'));
+  });
+})(window);
+
+</script>
